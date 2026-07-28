@@ -1,0 +1,15 @@
+[Unit]
+Description=CS Barber
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/csbarber
+EnvironmentFile=/etc/csbarber/env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

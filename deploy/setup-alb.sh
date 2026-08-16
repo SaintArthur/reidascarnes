@@ -3,7 +3,7 @@
 # Cria o Application Load Balancer do CS Barber: target group (porta 5000, health
 # check /api/health), o próprio ALB (internet-facing, HTTP:80), e libera a
 # instância EC2 pra receber tráfego do ALB. Rode DEPOIS que o app já estiver
-# rodando na instância (deploy/csbarber.service ativo).
+# rodando na instância (deploy/reidascarnes.service ativo).
 #
 # Rode NA SUA MÁQUINA (não na EC2), já logado no aws-cli.
 #
@@ -82,10 +82,10 @@ echo "  Subnets públicas (uma por AZ): $PUBLIC_SUBNET_IDS"
 echo
 echo "→ Security group do ALB..."
 ALB_SG_ID=$(aws ec2 describe-security-groups --region "$REGION" \
-  --filters "Name=group-name,Values=csbarber-alb-sg" "Name=vpc-id,Values=$VPC_ID" \
+  --filters "Name=group-name,Values=reidascarnes-alb-sg" "Name=vpc-id,Values=$VPC_ID" \
   --query 'SecurityGroups[0].GroupId' --output text)
 if [ -z "$ALB_SG_ID" ] || [ "$ALB_SG_ID" = "None" ]; then
-  ALB_SG_ID=$(aws ec2 create-security-group --region "$REGION" --group-name csbarber-alb-sg \
+  ALB_SG_ID=$(aws ec2 create-security-group --region "$REGION" --group-name reidascarnes-alb-sg \
     --description "CS Barber - trafego publico HTTP para o ALB" --vpc-id "$VPC_ID" --query GroupId --output text)
   aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$ALB_SG_ID" \
     --ip-permissions "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description='HTTP publico'}]" >/dev/null
@@ -108,9 +108,9 @@ fi
 # ─── 3. Target group (HTTP:5000, health check /api/health) ──────────────────
 echo
 echo "→ Target group..."
-TG_ARN=$(aws elbv2 describe-target-groups --region "$REGION" --names csbarber-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
+TG_ARN=$(aws elbv2 describe-target-groups --region "$REGION" --names reidascarnes-tg --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || echo "")
 if [ -z "$TG_ARN" ] || [ "$TG_ARN" = "None" ]; then
-  TG_ARN=$(aws elbv2 create-target-group --region "$REGION" --name csbarber-tg \
+  TG_ARN=$(aws elbv2 create-target-group --region "$REGION" --name reidascarnes-tg \
     --protocol HTTP --port 5000 --vpc-id "$VPC_ID" --target-type instance \
     --health-check-path /api/health --health-check-interval-seconds 15 \
     --healthy-threshold-count 2 --unhealthy-threshold-count 3 \
@@ -125,9 +125,9 @@ echo "  Instância registrada no target group."
 # ─── 4. O próprio Load Balancer ───────────────────────────────────────────────
 echo
 echo "→ Application Load Balancer..."
-ALB_ARN=$(aws elbv2 describe-load-balancers --region "$REGION" --names csbarber-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+ALB_ARN=$(aws elbv2 describe-load-balancers --region "$REGION" --names reidascarnes-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
 if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" = "None" ]; then
-  ALB_ARN=$(aws elbv2 create-load-balancer --region "$REGION" --name csbarber-alb \
+  ALB_ARN=$(aws elbv2 create-load-balancer --region "$REGION" --name reidascarnes-alb \
     --type application --scheme internet-facing \
     --subnets $PUBLIC_SUBNET_IDS --security-groups "$ALB_SG_ID" \
     --query 'LoadBalancers[0].LoadBalancerArn' --output text)

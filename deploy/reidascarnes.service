@@ -1,12 +1,12 @@
 [Unit]
-Description=CS Barber
+Description=Rei das Carnes
 After=network.target
 
 [Service]
 Type=simple
 User=ec2-user
-WorkingDirectory=/home/ec2-user/csbarber
-EnvironmentFile=/etc/csbarber/env
+WorkingDirectory=/home/ec2-user/reidascarnes
+EnvironmentFile=/etc/reidascarnes/env
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5

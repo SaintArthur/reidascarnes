@@ -13,13 +13,13 @@
 # pronto.
 #
 # Uso:
-#   DOMAIN=csbarber.conectasolucoes.ia.br ./deploy/setup-https.sh
+#   DOMAIN=seu-dominio.exemplo.br ./deploy/setup-https.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 if [ -z "${DOMAIN:-}" ]; then
   echo "Erro: defina DOMAIN. Exemplo:" >&2
-  echo "  DOMAIN=csbarber.conectasolucoes.ia.br ./deploy/setup-https.sh" >&2
+  echo "  DOMAIN=seu-dominio.exemplo.br ./deploy/setup-https.sh" >&2
   exit 1
 fi
 
@@ -71,9 +71,9 @@ echo "  Certificado emitido!"
 # ─── 2. Achar o ALB e o target group já criados (deploy/setup-alb.sh) ────────
 echo
 echo "→ Localizando o Load Balancer..."
-ALB_ARN=$(aws elbv2 describe-load-balancers --region "$REGION" --names csbarber-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text)
-ALB_DNS=$(aws elbv2 describe-load-balancers --region "$REGION" --names csbarber-alb --query 'LoadBalancers[0].DNSName' --output text)
-TG_ARN=$(aws elbv2 describe-target-groups --region "$REGION" --names csbarber-tg --query 'TargetGroups[0].TargetGroupArn' --output text)
+ALB_ARN=$(aws elbv2 describe-load-balancers --region "$REGION" --names reidascarnes-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+ALB_DNS=$(aws elbv2 describe-load-balancers --region "$REGION" --names reidascarnes-alb --query 'LoadBalancers[0].DNSName' --output text)
+TG_ARN=$(aws elbv2 describe-target-groups --region "$REGION" --names reidascarnes-tg --query 'TargetGroups[0].TargetGroupArn' --output text)
 ALB_SG_ID=$(aws elbv2 describe-load-balancers --region "$REGION" --load-balancer-arns "$ALB_ARN" --query 'LoadBalancers[0].SecurityGroups[0]' --output text)
 
 # Libera a porta 443 no security group do ALB, se ainda não estiver liberada
@@ -114,7 +114,7 @@ echo "════════════════════════�
 echo "HTTPS configurado. Falta só apontar o domínio pro Load Balancer."
 echo "No painel de DNS do domínio, adicione um registro CNAME:"
 echo
-echo "  Nome/Host:  csbarber"
+echo "  Nome/Host:  reidascarnes"
 echo "  Valor:      $ALB_DNS"
 echo
 echo "Depois de propagar (alguns minutos), acesse:"

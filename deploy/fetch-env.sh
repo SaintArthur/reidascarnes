@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # Roda DENTRO da instância EC2 (depois que deploy/setup-aws.sh já rodou na sua
-# máquina e anexou a IAM Role). Busca o segredo "csbarber/app-env" no Secrets
+# máquina e anexou a IAM Role). Busca o segredo "reidascarnes/app-env" no Secrets
 # Manager (usando a credencial da própria instância, via IAM Role — não precisa
-# de access key aqui), grava em /etc/csbarber/env, e cria o banco de dados no
+# de access key aqui), grava em /etc/reidascarnes/env, e cria o banco de dados no
 # Aurora se ele ainda não existir.
+#
+# ATENÇÃO: este arquivo era idêntico ao do sistema do qual este projeto foi forkado, e
+# apontava para o segredo e o caminho DAQUELE sistema. Segredo, diretório de env e nome
+# do banco aqui são exclusivos do Rei das Carnes — não aponte para os de outro projeto.
 #
 # Uso:
 #   sudo ./deploy/fetch-env.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-SECRET_NAME="csbarber/app-env"
-ENV_DIR="/etc/csbarber"
+SECRET_NAME="reidascarnes/app-env"
+ENV_DIR="/etc/reidascarnes"
 ENV_FILE="$ENV_DIR/env"
 
 command -v aws >/dev/null || { echo "Erro: aws-cli não encontrado nesta instância. Instale com 'sudo yum install -y aws-cli' (Amazon Linux) ou 'sudo apt install -y awscli' (Ubuntu)."; exit 1; }

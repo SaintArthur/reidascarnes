@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Configura a infraestrutura AWS do CS Barber: abre SSH pro seu IP atual, cria o
-# bucket S3 de fotos, junta tudo (JWT_SECRET, chaves VAPID, dados de conexão do
+# Configura a infraestrutura AWS do Rei das Carnes: abre SSH pro seu IP atual, cria
+# o bucket S3 de arquivos, junta tudo (JWT_SECRET, chaves VAPID, dados de conexão do
 # Aurora, bucket) num único segredo no Secrets Manager, e cria/anexa uma IAM Role
 # na instância EC2 com permissão só pra ler esse segredo, mexer nesse bucket, e
 # se conectar no Aurora via autenticação IAM (sem senha — esse tipo de cluster
@@ -12,13 +12,19 @@
 # de EC2, IAM, S3, Secrets Manager e RDS. Ele só CRIA/AJUSTA recursos — não apaga nada.
 #
 # Uso:
-#   EC2_PUBLIC_IP=15.229.255.105 ./deploy/setup-aws.sh
+#   EC2_PUBLIC_IP=... DB_CLUSTER_ID=... ./deploy/setup-aws.sh
 #
-# Variáveis de ambiente aceitas (só EC2_PUBLIC_IP é obrigatória):
-#   EC2_PUBLIC_IP    IP público da instância (obrigatório)
+# Variáveis de ambiente aceitas:
+#   EC2_PUBLIC_IP    IP público da instância (OBRIGATÓRIA)
+#   DB_CLUSTER_ID    identificador do cluster Aurora de destino (OBRIGATÓRIA)
 #   AWS_REGION       padrão: região configurada no seu aws-cli
-#   S3_BUCKET_NAME   padrão: csbarber-photos-<account-id>
-#   DB_NAME          padrão: barberpro
+#   S3_BUCKET_NAME   padrão: reidascarnes-arquivos-<account-id>
+#   DB_NAME          padrão: reidascarnes
+#
+# ATENÇÃO: este projeto nasceu como fork de outro sistema e por isso apontava para os
+# recursos DAQUELE sistema (segredo, bucket, IAM role, banco). Os nomes abaixo são os
+# do Rei das Carnes. Não reaproveite recursos de outro projeto aqui: este script grava
+# no segredo com put-secret-value, que SUBSTITUI o conteúdo inteiro.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -40,11 +46,30 @@ if [ -z "$REGION" ]; then
   echo "Erro: nenhuma região configurada. Defina AWS_REGION=us-east-1 (ou a região da sua conta)." >&2
   exit 1
 fi
-S3_BUCKET_NAME=${S3_BUCKET_NAME:-"csbarber-photos-${ACCOUNT_ID}"}
-DB_NAME=${DB_NAME:-barberpro}
-ROLE_NAME="csbarber-ec2-role"
-PROFILE_NAME="csbarber-ec2-profile"
-SECRET_NAME="csbarber/app-env"
+S3_BUCKET_NAME=${S3_BUCKET_NAME:-"reidascarnes-arquivos-${ACCOUNT_ID}"}
+DB_NAME=${DB_NAME:-reidascarnes}
+ROLE_NAME="reidascarnes-ec2-role"
+PROFILE_NAME="reidascarnes-ec2-profile"
+SECRET_NAME="reidascarnes/app-env"
+
+# O cluster de destino é EXPLÍCITO, nunca descoberto sozinho — e a checagem fica AQUI, antes de
+# qualquer alteração na conta, porque as seções seguintes já mexem em Security Group e criam
+# bucket: abortar no meio deixaria recursos criados por um comando que nem tinha destino definido.
+#
+# Antes o script pegava o primeiro cluster Aurora que a listagem devolvesse, e essa listagem não
+# tem ordem garantida. Com mais de um cluster na conta ele escolhia o ERRADO em silêncio. Aqui o
+# risco é específico: este projeto é um fork e já apontou para o cluster de outro sistema.
+if [ -z "${DB_CLUSTER_ID:-}" ]; then
+  echo "Erro: defina DB_CLUSTER_ID com o cluster Aurora do Rei das Carnes." >&2
+  echo "  Este script NÃO escolhe o cluster sozinho: o endpoint escolhido vai parar no segredo," >&2
+  echo "  e apontar pro cluster de outro sistema faz esta aplicação subir contra o banco dele." >&2
+  echo "  Clusters Aurora PostgreSQL nesta conta/região:" >&2
+  aws rds describe-db-clusters --region "$REGION" \
+    --query "DBClusters[?Engine=='aurora-postgresql'].[DBClusterIdentifier,Endpoint]" \
+    --output text >&2 || true
+  echo "  Exemplo: EC2_PUBLIC_IP=$EC2_PUBLIC_IP DB_CLUSTER_ID=<cluster-do-rei-das-carnes> ./deploy/setup-aws.sh" >&2
+  exit 1
+fi
 
 echo "Conta AWS: $ACCOUNT_ID | Região: $REGION"
 echo
@@ -99,7 +124,7 @@ fi
 # que é o padrão recomendado hoje; a leitura pública vem só da policy abaixo).
 aws s3api put-public-access-block --bucket "$S3_BUCKET_NAME" --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false
-cat > /tmp/csbarber-bucket-policy.json <<EOF
+cat > /tmp/reidascarnes-bucket-policy.json <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [{
@@ -111,20 +136,18 @@ cat > /tmp/csbarber-bucket-policy.json <<EOF
   }]
 }
 EOF
-aws s3api put-bucket-policy --bucket "$S3_BUCKET_NAME" --policy file:///tmp/csbarber-bucket-policy.json
-rm -f /tmp/csbarber-bucket-policy.json
+aws s3api put-bucket-policy --bucket "$S3_BUCKET_NAME" --policy file:///tmp/reidascarnes-bucket-policy.json
+rm -f /tmp/reidascarnes-bucket-policy.json
 echo "  Bucket policy aplicada (leitura pública só em avatars/* e portfolio/*)."
 
 # ─── 4. Descobrir o cluster Aurora (autenticação IAM — sem senha) ────────────
 echo
-echo "→ Procurando cluster Aurora PostgreSQL..."
-CLUSTER_ID=$(aws rds describe-db-clusters --region "$REGION" \
-  --query "DBClusters[?Engine=='aurora-postgresql'].DBClusterIdentifier | [0]" --output text)
-if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "None" ]; then
-  echo "Erro: nenhum cluster Aurora PostgreSQL encontrado na região $REGION." >&2
+CLUSTER_ID="$DB_CLUSTER_ID"
+echo "→ Usando o cluster Aurora informado: $CLUSTER_ID"
+CLUSTER_INFO=$(aws rds describe-db-clusters --region "$REGION" --db-cluster-identifier "$CLUSTER_ID") || {
+  echo "Erro: cluster '$CLUSTER_ID' não encontrado na região $REGION." >&2
   exit 1
-fi
-CLUSTER_INFO=$(aws rds describe-db-clusters --region "$REGION" --db-cluster-identifier "$CLUSTER_ID")
+}
 ENDPOINT=$(echo "$CLUSTER_INFO" | node -e "console.log(JSON.parse(require('fs').readFileSync(0)).DBClusters[0].Endpoint)")
 DB_USER=$(echo "$CLUSTER_INFO" | node -e "console.log(JSON.parse(require('fs').readFileSync(0)).DBClusters[0].MasterUsername)")
 DB_CLUSTER_RESOURCE_ID=$(echo "$CLUSTER_INFO" | node -e "console.log(JSON.parse(require('fs').readFileSync(0)).DBClusters[0].DbClusterResourceId)")
@@ -192,7 +215,7 @@ fi
 aws iam attach-role-policy --role-name "$ROLE_NAME" \
   --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
-cat > /tmp/csbarber-inline-policy.json <<EOF
+cat > /tmp/reidascarnes-inline-policy.json <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -202,9 +225,9 @@ cat > /tmp/csbarber-inline-policy.json <<EOF
   ]
 }
 EOF
-aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name "csbarber-app-access" \
-  --policy-document file:///tmp/csbarber-inline-policy.json
-rm -f /tmp/csbarber-inline-policy.json
+aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name "reidascarnes-app-access" \
+  --policy-document file:///tmp/reidascarnes-inline-policy.json
+rm -f /tmp/reidascarnes-inline-policy.json
 echo "  Política de acesso (segredo + bucket + conexão IAM no Aurora) aplicada."
 
 if ! aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then

@@ -12,7 +12,7 @@ ler esse segredo, mexer nesse bucket, e se conectar no Aurora via autenticação
 
 ```bash
 aws configure   # ou aws sso login, se você usa SSO
-EC2_PUBLIC_IP=15.229.255.105 ./deploy/setup-aws.sh
+EC2_PUBLIC_IP=15.229.255.105 DB_CLUSTER_ID=<cluster-do-rei-das-carnes> ./deploy/setup-aws.sh
 ```
 
 O cluster Aurora precisa estar com **"IAM database authentication"** habilitado (RDS >
@@ -39,24 +39,24 @@ aws ssm start-session --target <instance-id>
 ## 3. Dentro da instância — `fetch-env.sh`
 
 ```bash
-git clone <url-do-seu-repo> csbarber
-cd csbarber
+git clone <url-do-seu-repo> reidascarnes
+cd reidascarnes
 node -v || (curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -; sudo yum install -y nodejs)  # Amazon Linux
 npm ci --omit=dev
-sudo ./deploy/fetch-env.sh   # busca o segredo do passo 1, grava /etc/csbarber/env, cria o banco
+sudo ./deploy/fetch-env.sh   # busca o segredo do passo 1, grava /etc/reidascarnes/env, cria o banco
 ```
 
 ## 4. Subir como serviço (systemd)
 
 ```bash
-sudo cp deploy/csbarber.service /etc/systemd/system/csbarber.service
+sudo cp deploy/reidascarnes.service /etc/systemd/system/reidascarnes.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now csbarber
-sudo systemctl status csbarber       # confirmar que subiu
+sudo systemctl enable --now reidascarnes
+sudo systemctl status reidascarnes       # confirmar que subiu
 curl localhost:5000/api/health       # confirmar que responde
 ```
 
-Logs: `journalctl -u csbarber -f`
+Logs: `journalctl -u reidascarnes -f`
 
 ## 5. ALB + WAF
 
@@ -67,5 +67,5 @@ Logs: `journalctl -u csbarber -f`
 ## Atualizar o app depois (novo deploy)
 
 ```bash
-cd csbarber && git pull && npm ci --omit=dev && sudo systemctl restart csbarber
+cd reidascarnes && git pull && npm ci --omit=dev && sudo systemctl restart reidascarnes
 ```

@@ -16,6 +16,40 @@ const FOCUS_BASE_URL = FOCUS_NFE_ENV === 'producao'
   ? 'https://api.focusnfe.com.br'
   : 'https://homologacao.focusnfe.com.br';
 
+
+// A Focus recusa nota com data_emissao a mais de 5 minutos do horário atual. Mandar em UTC
+// ("...Z") é arriscado: qualquer ponta que interprete o horário como local erra por 3 horas e
+// a SEFAZ rejeita. Por isso emitimos com o offset local explícito (-03:00 no Brasil).
+function dataEmissaoLocal(d = new Date()) {
+  const off = -d.getTimezoneOffset();          // minutos; Brasil = -180 => off = 180? (invertido)
+  const sinal = off >= 0 ? '+' : '-';
+  const abs = Math.abs(off);
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const mm = String(abs % 60).padStart(2, '0');
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${sinal}${hh}:${mm}`;
+}
+
+// A emissão de NFC-e é SÍNCRONA: a resposta já traz `autorizado` ou `erro_autorizacao`.
+// Traduzir para o status interno aqui evita que cada rota repita (e erre) essa regra —
+// antes, `erro_autorizacao` caía no ramo de "ok" e a nota ficava eternamente "processando",
+// escondendo a mensagem da SEFAZ que explica a rejeição.
+function statusInterno(result) {
+  const s = result?.data?.status;
+  if (s === 'autorizado') return 'autorizada';
+  if (s === 'erro_autorizacao' || s === 'erro') return 'erro';
+  if (!result?.ok) return 'erro';
+  return 'processando'; // NF-e modelo 55 é assíncrona e pode legitimamente cair aqui
+}
+
+// `caminho_danfe` e `caminho_xml_nota_fiscal` vêm como caminho relativo. Guardar assim faz o
+// front tentar abrir um link quebrado na hora de imprimir o cupom.
+function urlAbsoluta(caminho) {
+  if (!caminho) return null;
+  return /^https?:\/\//.test(caminho) ? caminho : `${FOCUS_BASE_URL}${caminho.startsWith('/') ? '' : '/'}${caminho}`;
+}
+
 function isFocusConfigured() {
   return !!FOCUS_NFE_TOKEN;
 }
@@ -73,7 +107,7 @@ function buildNFePayload({ tipo, emitente, destinatario, itens, natureza_operaca
   const isEntrada = tipo === 'entrada';
   return {
     natureza_operacao: natureza_operacao || (isEntrada ? 'Compra de produtor rural' : 'Venda de mercadoria'),
-    data_emissao: new Date().toISOString(),
+    data_emissao: dataEmissaoLocal(),
     tipo_documento: isEntrada ? 0 : 1, // 0 = entrada, 1 = saída
     finalidade_emissao: 1, // 1 = normal
     cnpj_emitente: emitente?.cnpj,
@@ -144,10 +178,79 @@ const FORMA_PAGAMENTO_SEFAZ = {
   pix: '17',
 };
 
+
+// ─── Contingência offline (NFC-e) ─────────────────────────────────────────────
+// Quando a SEFAZ está fora do ar, a legislação permite emitir a NFC-e em contingência
+// offline (tpEmis=9): o cupom sai na hora para o cliente levar, e a nota é transmitida
+// depois. Nesse modo a numeração NÃO pode ser delegada à Focus — o emitente precisa informar
+// número, série e o código único (cNF), porque a chave de acesso é montada localmente.
+//
+// Usamos uma SÉRIE DEDICADA para contingência (padrão 9). Assim a numeração offline nunca
+// colide com a numeração online, que a Focus continua atribuindo sozinha. Misturar as duas
+// no mesmo intervalo é a forma mais comum de gerar "número duplicado" na SEFAZ.
+//
+// LIMITE ARQUITETURAL, e é importante: isso resolve SEFAZ fora do ar, não internet fora da
+// loja. Com o sistema na nuvem, se a internet do açougue cair o navegador nem alcança o
+// servidor — aí nada funciona, nem o caixa. Contingência de verdade contra queda de internet
+// exige o sistema rodando DENTRO da loja (ou o Comunicador Offline da Focus, que é um
+// aplicativo Windows local).
+async function emitNFCeContingencia(ref, payload) {
+  return focusRequest('POST', `/v2/nfce?ref=${encodeURIComponent(ref)}&forma_emissao=offline`, payload);
+}
+
+// cNF: código numérico de 8 dígitos que compõe a chave de acesso. A regra da SEFAZ é que ele
+// não pode ser igual ao número da nota — daí o sorteio e a verificação.
+function gerarCodigoUnico(numeroNota) {
+  let codigo;
+  do {
+    codigo = String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
+  } while (Number(codigo) === Number(numeroNota));
+  return codigo;
+}
+
+// Decide se vale tentar contingência. Erro de rede ou indisponibilidade da SEFAZ/Focus, sim.
+// Nota recusada por dado errado (CST inválido, NCM inexistente), não — em contingência ela
+// seria recusada de novo na efetivação, e aí o cupom já estaria na mão do cliente.
+function deveUsarContingencia(erroOuResultado) {
+  if (erroOuResultado?.code === 'FOCUS_NETWORK_ERROR') return true;
+  const status = erroOuResultado?.status;
+  if (status === 503 || status === 504 || status === 502) return true;
+  const msg = String(erroOuResultado?.data?.mensagem_sefaz || erroOuResultado?.data?.mensagem || '').toLowerCase();
+  // Mensagens que a SEFAZ devolve quando está fora: "Serviço Paralisado sem previsão" (108),
+  // "Serviço Paralisado momentaneamente" (109), além de indisponibilidade e timeout.
+  return /paralisad|fora de opera|indisponi|tempo de espera|timeout|servico em manuten/.test(msg);
+}
+
+
+// ─── Inutilização de numeração ────────────────────────────────────────────────
+// Quando um número de nota é "queimado" sem virar documento (falha no meio da emissão, salto
+// de numeração), o emitente precisa declarar à SEFAZ que aquele intervalo não será usado.
+// Sem isso fica um buraco na sequência, que é exatamente o que o fisco procura numa auditoria.
+async function inutilizarNumeracao({ cnpj, serie, numeroInicial, numeroFinal, justificativa }) {
+  return focusRequest('POST', '/v2/nfce/inutilizacao', {
+    cnpj, serie: String(serie),
+    numero_inicial: String(numeroInicial),
+    numero_final: String(numeroFinal),
+    justificativa,
+  });
+}
+
+async function consultarInutilizacoes(cnpj) {
+  return focusRequest('GET', `/v2/nfce/inutilizacao?cnpj=${encodeURIComponent(cnpj)}`);
+}
+
+// ─── Carta de correção (só NF-e modelo 55) ───────────────────────────────────
+// A legislação NÃO permite carta de correção para NFC-e (modelo 65) — nota de consumidor
+// errada se cancela e reemite. Por isso esta função só serve ao fluxo de NF-e do atacado,
+// e quem chamar precisa saber disso.
+async function cartaCorrecaoNFe(ref, correcao) {
+  return focusRequest('POST', `/v2/nfe/${encodeURIComponent(ref)}/carta_correcao`, { correcao });
+}
+
 function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, cpf_destinatario }) {
   return {
     natureza_operacao: 'Venda ao consumidor',
-    data_emissao: new Date().toISOString(),
+    data_emissao: dataEmissaoLocal(),
     tipo_documento: 1,        // saída
     finalidade_emissao: 1,    // normal
     presenca_comprador: 1,    // operação presencial — exigido na NFC-e
@@ -208,11 +311,20 @@ function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, cpf_d
 
 module.exports = {
   isFocusConfigured,
+  dataEmissaoLocal,
+  statusInterno,
+  urlAbsoluta,
   emitNFe,
   consultNFe,
   cancelNFe,
   buildNFePayload,
   emitNFCe,
+  emitNFCeContingencia,
+  inutilizarNumeracao,
+  consultarInutilizacoes,
+  cartaCorrecaoNFe,
+  gerarCodigoUnico,
+  deveUsarContingencia,
   consultNFCe,
   cancelNFCe,
   buildNFCePayload,

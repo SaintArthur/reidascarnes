@@ -443,6 +443,25 @@ async function initDatabase() {
   // quando a leitura é de etiqueta de balança, e `barcode` quando é EAN de fábrica.
   await pool.query('ALTER TABLE acougue_products ADD COLUMN IF NOT EXISTS scale_code TEXT');
 
+  // A Focus devolve o QR Code e a URL de consulta da NFC-e — sem guardar, não dá pra
+  // reimprimir um cupom válido depois, nem mostrar ao consumidor como conferir a nota.
+  for (const col of ['qrcode_url TEXT', 'url_consulta TEXT', 'status_sefaz TEXT',
+                     'contingencia INTEGER DEFAULT 0', 'contingencia_efetivada INTEGER DEFAULT 0']) {
+    await pool.query(`ALTER TABLE acougue_invoices ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+
+  // Conferência de etiqueta: registra que alguém bipou a etiqueta REAL da balança e confirmou
+  // (ou não) que o PLU daquele produto casa com o cadastro. É a única forma de detectar o
+  // descasamento entre a programação da balança e o sistema — nenhuma consulta ao banco revela
+  // isso, porque internamente o cadastro é consistente. Com emissão fiscal ligada, PLU trocado
+  // significa produto e valor errados numa NFC-e real.
+  for (const col of [
+    'plu_conferido_em TIMESTAMP', 'plu_conferido_por INTEGER REFERENCES users(id)',
+    'plu_confere INTEGER', 'plu_observacao TEXT',
+  ]) {
+    await pool.query(`ALTER TABLE acougue_products ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+
   // Campos fiscais por produto. Não dá pra deduzir nenhum deles no código: NCM depende do corte
   // (carne bovina fresca, resfriada e congelada têm códigos diferentes), CFOP depende da
   // operação, e o CST/CSOSN depende do regime tributário da empresa E do tratamento do ICMS
@@ -673,6 +692,11 @@ async function initDatabase() {
     // geral 0,5%–2% nas primeiras 24h, caindo depois). O número REAL desta câmara depende de
     // temperatura, umidade, ventilação e de a peça estar coberta ou não — por isso é editável
     // em Configurações, e o sistema mostra sempre o esperado ao lado do real medido.
+    // Série dedicada à contingência offline e o próximo número dela. Série separada porque a
+    // numeração online é atribuída pela Focus — misturar as duas no mesmo intervalo é a causa
+    // clássica de "número duplicado" na SEFAZ.
+    ['acougue_nfce_serie_contingencia', '9'],
+    ['acougue_nfce_proximo_numero_contingencia', '1'],
     ['acougue_shrink_pct_day', '0.8'],
     // Layout da etiqueta da balança (ver scale-barcode.js), conferido numa etiqueta real:
     // 2 + PLU de 6 dígitos + preço total em centavos de 5 dígitos + DV. Se a balança for
@@ -2820,14 +2844,46 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
 
     const ref = `acougue-nfce-${invoiceId}`;
     try {
-      const result = await focusNfe.emitNFCe(ref, payload);
-      const status = result.data?.status === 'autorizado' ? 'autorizada' : (result.ok ? 'processando' : 'erro');
+      let result = await focusNfe.emitNFCe(ref, payload);
+      let emContingencia = false;
+
+      // SEFAZ fora do ar não pode parar o balcão: a lei permite emitir em contingência
+      // offline e transmitir depois. Só entra aqui por indisponibilidade — nota recusada por
+      // dado errado seria recusada de novo na efetivação, com o cupom já na mão do cliente.
+      if (focusNfe.statusInterno(result) === 'erro' && focusNfe.deveUsarContingencia(result)) {
+        const numero = Number(settings.nfce_proximo_numero_contingencia || 1);
+        const serie = String(settings.nfce_serie_contingencia || 9);
+        const contingenciaPayload = {
+          ...payload, numero: String(numero), serie,
+          codigo_unico: focusNfe.gerarCodigoUnico(numero),
+        };
+        const tentativa = await focusNfe.emitNFCeContingencia(`${ref}-cont`, contingenciaPayload);
+        if (focusNfe.statusInterno(tentativa) !== 'erro') {
+          result = tentativa;
+          emContingencia = true;
+          await db.run('UPDATE settings SET value = ? WHERE key = ?',
+            [String(numero + 1), 'acougue_nfce_proximo_numero_contingencia']);
+        }
+      }
+
+      // NFC-e é síncrona: `autorizado` ou `erro_autorizacao` já vêm nesta resposta. O status
+      // chega a vir com HTTP 201 mesmo quando a SEFAZ REJEITOU, então não dá pra confiar só
+      // no código HTTP — quem decide é o campo `status`.
+      const status = focusNfe.statusInterno(result);
+      const d = result.data || {};
       await db.run(
-        'UPDATE acougue_invoices SET status=?, focus_ref=?, chave_acesso=?, numero=?, serie=?, xml_url=?, danfe_url=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
-        [status, ref, result.data?.chave_nfe || null, result.data?.numero || null, result.data?.serie || null,
-         result.data?.caminho_xml_nota_fiscal || null, result.data?.caminho_danfe || null,
-         result.ok ? null : (result.data?.mensagem_sefaz || result.data?.mensagem || 'Erro na Focus NFe'), invoiceId]
+        `UPDATE acougue_invoices SET status=?, focus_ref=?, chave_acesso=?, numero=?, serie=?,
+           xml_url=?, danfe_url=?, qrcode_url=?, url_consulta=?, status_sefaz=?, error_message=?,
+           updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+        [status, ref, d.chave_nfe || null, d.numero || null, d.serie || null,
+         focusNfe.urlAbsoluta(d.caminho_xml_nota_fiscal), focusNfe.urlAbsoluta(d.caminho_danfe),
+         d.qrcode_url || null, d.url_consulta_nf || null, d.status_sefaz || null,
+         status === 'erro' ? (d.mensagem_sefaz || d.mensagem || 'Erro na Focus NFe') : null, invoiceId]
       );
+      if (emContingencia) {
+        await db.run('UPDATE acougue_invoices SET contingencia = 1, contingencia_efetivada = ? WHERE id = ?',
+          [d.contingencia_offline_efetivada ? 1 : 0, invoiceId]);
+      }
       const invoice = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [invoiceId]);
       res.status(201).json({ ...invoice, sale_id: sale.id, raw: result.data });
     } catch (focusErr) {
@@ -2995,6 +3051,224 @@ app.post('/api/acougue/taxes/periods/close', ...acougueOnly, async (req, res) =>
       [month, year, apuracao.pis_credit, apuracao.pis_debit, apuracao.pis_due, apuracao.cofins_credit, apuracao.cofins_debit, apuracao.cofins_due, req.user.id]
     );
     res.status(201).json({ id: rows[0].id, ...apuracao });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Consulta e cancelamento de NFC-e ---- */
+// Reconsulta a nota na Focus e atualiza o que temos. Serve para dois casos reais do balcão:
+// a emissão respondeu mas a rede caiu antes de gravarmos, ou alguém precisa reimprimir uma
+// nota antiga e o DANFE não está mais em cache.
+app.post('/api/acougue/nfce/:id/consultar', ...acougueOnly, async (req, res) => {
+  try {
+    const nota = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
+    if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
+    if (!nota.focus_ref) return res.status(422).json({ error: 'Esta nota nunca foi enviada à Focus (ficou como rascunho).' });
+    if (!focusNfe.isFocusConfigured()) return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+
+    const result = await focusNfe.consultNFCe(nota.focus_ref);
+    if (result.status === 404) {
+      return res.status(404).json({ error: 'A Focus não conhece esta referência — a nota não chegou a ser criada lá.' });
+    }
+    const d = result.data || {};
+    const status = focusNfe.statusInterno(result);
+    await db.run(
+      `UPDATE acougue_invoices SET status=?, chave_acesso=?, numero=?, serie=?, xml_url=?, danfe_url=?,
+         qrcode_url=?, url_consulta=?, status_sefaz=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      [status, d.chave_nfe || nota.chave_acesso, d.numero || nota.numero, d.serie || nota.serie,
+       focusNfe.urlAbsoluta(d.caminho_xml_nota_fiscal) || nota.xml_url,
+       focusNfe.urlAbsoluta(d.caminho_danfe) || nota.danfe_url,
+       d.qrcode_url || nota.qrcode_url, d.url_consulta_nf || nota.url_consulta, d.status_sefaz || null,
+       status === 'erro' ? (d.mensagem_sefaz || d.mensagem || null) : null, req.params.id]);
+
+    res.json({ ...(await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id])), sefaz: d.mensagem_sefaz || null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Cancelamento tem prazo legal (em geral 30 min para NFC-e) e exige justificativa de no
+// mínimo 15 caracteres — a SEFAZ recusa texto curto, então validamos antes de gastar a chamada.
+app.post('/api/acougue/nfce/:id/cancelar', ...acougueOnly, async (req, res) => {
+  const justificativa = String(req.body?.justificativa || '').trim();
+  if (justificativa.length < 15) {
+    return res.status(400).json({ error: 'A SEFAZ exige justificativa com no mínimo 15 caracteres.' });
+  }
+  try {
+    const nota = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
+    if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
+    if (nota.status !== 'autorizada') {
+      return res.status(409).json({ error: `Só dá para cancelar nota autorizada. Esta está como "${nota.status}".` });
+    }
+    if (!focusNfe.isFocusConfigured()) return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+
+    const result = await focusNfe.cancelNFCe(nota.focus_ref, justificativa);
+    const d = result.data || {};
+    if (!result.ok && d.status !== 'cancelado') {
+      return res.status(502).json({ error: d.mensagem_sefaz || d.mensagem || 'A SEFAZ recusou o cancelamento.', raw: d });
+    }
+    await db.run(
+      "UPDATE acougue_invoices SET status='cancelada', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      [`Cancelada: ${justificativa}`, req.params.id]);
+    res.json({ id: Number(req.params.id), status: 'cancelada', sefaz: d.mensagem_sefaz || null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Inutilização de numeração ---- */
+// Declara à SEFAZ que um intervalo de números não virou nota. Buraco na sequência sem
+// inutilização declarada é achado clássico de auditoria fiscal.
+app.post('/api/acougue/nfce/inutilizar', ...acougueOnly, async (req, res) => {
+  const { serie, numero_inicial, numero_final, justificativa } = req.body || {};
+  const just = String(justificativa || '').trim();
+  if (!serie || !numero_inicial || !numero_final) {
+    return res.status(400).json({ error: 'Informe série, número inicial e número final.' });
+  }
+  if (Number(numero_final) < Number(numero_inicial)) {
+    return res.status(400).json({ error: 'O número final não pode ser menor que o inicial.' });
+  }
+  if (just.length < 15) {
+    return res.status(400).json({ error: 'A SEFAZ exige justificativa com no mínimo 15 caracteres.' });
+  }
+  try {
+    const settings = await getAcougueSettingsMap();
+    if (!settings.cnpj) return res.status(422).json({ error: 'CNPJ do açougue não configurado.' });
+    if (!focusNfe.isFocusConfigured()) return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+
+    const result = await focusNfe.inutilizarNumeracao({
+      cnpj: settings.cnpj, serie, numeroInicial: numero_inicial, numeroFinal: numero_final, justificativa: just,
+    });
+    const d = result.data || {};
+    if (!result.ok) {
+      return res.status(502).json({ error: d.mensagem_sefaz || d.mensagem || 'A SEFAZ recusou a inutilização.', raw: d });
+    }
+    res.status(201).json({ ok: true, serie, numero_inicial, numero_final, sefaz: d.mensagem_sefaz || null, raw: d });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/acougue/nfce/inutilizacoes', ...acougueOnly, async (req, res) => {
+  try {
+    const settings = await getAcougueSettingsMap();
+    if (!settings.cnpj) return res.status(422).json({ error: 'CNPJ do açougue não configurado.' });
+    if (!focusNfe.isFocusConfigured()) return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+    const result = await focusNfe.consultarInutilizacoes(settings.cnpj);
+    res.status(result.ok ? 200 : 502).json(result.data || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Carta de correção (apenas NF-e modelo 55) ---- */
+app.post('/api/acougue/nfe/:id/carta-correcao', ...acougueOnly, async (req, res) => {
+  const correcao = String(req.body?.correcao || '').trim();
+  if (correcao.length < 15) {
+    return res.status(400).json({ error: 'A SEFAZ exige texto de correção com no mínimo 15 caracteres.' });
+  }
+  try {
+    const nota = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
+    if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
+    // A legislação não admite carta de correção para NFC-e: nota de consumidor errada se
+    // cancela e reemite. Barrar aqui evita uma recusa confusa lá na SEFAZ.
+    if (String(nota.focus_ref || '').includes('nfce')) {
+      return res.status(409).json({ error: 'Carta de correção não existe para NFC-e (modelo 65). Cancele a nota e emita outra.' });
+    }
+    if (nota.status !== 'autorizada') {
+      return res.status(409).json({ error: `Só cabe carta de correção em nota autorizada. Esta está como "${nota.status}".` });
+    }
+    if (!focusNfe.isFocusConfigured()) return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+
+    const result = await focusNfe.cartaCorrecaoNFe(nota.focus_ref, correcao);
+    const d = result.data || {};
+    if (!result.ok) return res.status(502).json({ error: d.mensagem_sefaz || d.mensagem || 'A SEFAZ recusou a carta de correção.', raw: d });
+    res.status(201).json({ ok: true, sefaz: d.mensagem_sefaz || null, raw: d });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Contingência offline ---- */
+// Notas emitidas em contingência que ainda não foram efetivadas na SEFAZ. Isso é dívida
+// fiscal aberta: a lei dá prazo para transmitir, e passar do prazo gera multa. Por isso fica
+// visível como contador, não escondido num relatório.
+app.get('/api/acougue/nfce/contingencia', ...acougueOnly, async (req, res) => {
+  try {
+    const pendentes = await db.all(
+      `SELECT i.*, s.sale_number FROM acougue_invoices i
+       LEFT JOIN acougue_sales s ON s.id = i.ref_id AND i.ref_type = 'venda'
+       WHERE i.contingencia = 1 AND i.contingencia_efetivada = 0
+       ORDER BY i.created_at`, []);
+    res.json({
+      pendentes,
+      total: pendentes.length,
+      // A referência usual para NFC-e é transmitir em até 24h; o número exato é do regulamento
+      // estadual, por isso só sinalizamos as mais antigas em vez de afirmar prazo.
+      mais_antiga_horas: pendentes.length
+        ? Math.floor((Date.now() - new Date(pendentes[0].created_at).getTime()) / 3600000)
+        : 0,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Tenta efetivar (transmitir) uma nota emitida em contingência. Na prática é reconsultar a
+// Focus: ela retransmite as offline assim que a SEFAZ volta, e a consulta revela se já foi.
+app.post('/api/acougue/nfce/:id/efetivar', ...acougueOnly, async (req, res) => {
+  try {
+    const nota = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
+    if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
+    if (!nota.contingencia) return res.status(409).json({ error: 'Esta nota não foi emitida em contingência.' });
+    if (nota.contingencia_efetivada) return res.status(409).json({ error: 'Esta nota já foi efetivada.' });
+    if (!focusNfe.isFocusConfigured()) return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+
+    const result = await focusNfe.consultNFCe(nota.focus_ref);
+    const d = result.data || {};
+    const efetivada = d.contingencia_offline_efetivada === true || d.status === 'autorizado';
+    await db.run(
+      `UPDATE acougue_invoices SET contingencia_efetivada=?, status=?, chave_acesso=?,
+         danfe_url=?, qrcode_url=?, status_sefaz=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      [efetivada ? 1 : 0, focusNfe.statusInterno(result), d.chave_nfe || nota.chave_acesso,
+       focusNfe.urlAbsoluta(d.caminho_danfe) || nota.danfe_url, d.qrcode_url || nota.qrcode_url,
+       d.status_sefaz || null, req.params.id]);
+
+    res.json({
+      id: Number(req.params.id), efetivada,
+      mensagem: efetivada ? 'Nota transmitida e autorizada pela SEFAZ.'
+                          : 'Ainda não efetivada — a SEFAZ pode continuar fora do ar. Tente de novo mais tarde.',
+      sefaz: d.mensagem_sefaz || null,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Conferência de etiquetas (PLU da balança x cadastro) ---- */
+// Panorama da conferência: quantos já foram bipados e confirmados, quantos divergiram e
+// quantos ninguém olhou ainda. Enquanto houver produto não conferido, existe risco de sair
+// produto errado numa nota fiscal real.
+app.get('/api/acougue/plu-audit', ...acougueOnly, async (req, res) => {
+  try {
+    const { rows: [resumo] } = await pool.query(`
+      SELECT COUNT(*)::int AS total,
+             COUNT(*) FILTER (WHERE plu_confere = 1)::int AS conferidos,
+             COUNT(*) FILTER (WHERE plu_confere = 0)::int AS divergentes,
+             COUNT(*) FILTER (WHERE plu_confere IS NULL)::int AS pendentes
+      FROM acougue_products WHERE active = 1`);
+
+    // Nome diferente do contador `divergentes` do resumo de propósito: espalhar o resumo e
+    // depois adicionar uma chave de mesmo nome sobrescrevia a contagem com o array.
+    const lista_divergentes = await db.all(`
+      SELECT id, scale_code, name, price, unit, plu_observacao, plu_conferido_em
+      FROM acougue_products WHERE active = 1 AND plu_confere = 0
+      ORDER BY (scale_code)::bigint`, []);
+
+    res.json({ ...resumo, lista_divergentes });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Registra o resultado da conferência de um produto.
+app.post('/api/acougue/products/:id/conferir-plu', ...acougueOnly, async (req, res) => {
+  const { confere, observacao } = req.body;
+  if (confere !== true && confere !== false) {
+    return res.status(400).json({ error: 'Informe confere: true ou false.' });
+  }
+  try {
+    const produto = await db.get('SELECT * FROM acougue_products WHERE id = ? AND active = 1', [req.params.id]);
+    if (!produto) return res.status(404).json({ error: 'Produto não encontrado' });
+
+    await db.run(
+      'UPDATE acougue_products SET plu_confere=?, plu_observacao=?, plu_conferido_em=CURRENT_TIMESTAMP, plu_conferido_por=? WHERE id=?',
+      [confere ? 1 : 0, observacao || null, req.user.id, req.params.id]);
+
+    res.json(await db.get('SELECT id, name, scale_code, plu_confere, plu_observacao FROM acougue_products WHERE id = ?', [req.params.id]));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -3334,7 +3608,8 @@ app.get('/api/acougue/settings', ...acougueOnly, async (req, res) => {
 
 app.patch('/api/acougue/settings', ...acougueOnly, async (req, res) => {
   const allowedKeys = ['business_name', 'cnpj', 'ie', 'logradouro', 'numero', 'bairro', 'municipio', 'uf', 'cep', 'regime_tributario', 'pis_rate', 'cofins_rate', 'dressing_pct', 'blood_pct', 'hide_pct', 'head_feet_pct',
-    'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type', 'hotkeys', 'shrink_pct_day'];
+    'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type', 'hotkeys', 'shrink_pct_day',
+    'nfce_serie_contingencia', 'nfce_proximo_numero_contingencia'];
   try {
     for (const key of allowedKeys) {
       if (req.body[key] !== undefined) {

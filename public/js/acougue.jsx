@@ -23,6 +23,7 @@
         { id: 'rendimento', icon: 'fas fa-calculator', label: 'Rendimento de Carcaça' },
         { id: 'saida', icon: 'fas fa-drumstick-bite', label: 'Saída de Cortes' },
         { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos' },
+        { id: 'conferencia', icon: 'fas fa-clipboard-check', label: 'Conferir Etiquetas' },
         { id: 'caixa', icon: 'fas fa-cash-register', label: 'Caixa' },
         { id: 'notas', icon: 'fas fa-file-invoice', label: 'Emissão de Nota' },
         { id: 'impostos', icon: 'fas fa-percent', label: 'PIS / COFINS' },
@@ -133,6 +134,8 @@
       return (
         <div>
           <AcgSectionTitle icon="fa-chart-pie" title="Controle Financeiro do Açougue" subtitle="Visão geral do mês corrente" />
+
+          <AcougueContingencia showToast={showToast} />
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 14, marginBottom: 24 }}>
             <AcgCard label="Entradas do mês" value={fmtCur(data.entradas_mes)} icon="fa-truck-loading" color="#3b82f6" bg="rgba(59,130,246,0.12)" />
@@ -645,6 +648,129 @@
               />
             )}
           </div>
+        </div>
+      );
+    }
+
+    /* ---- CONFERÊNCIA DE ETIQUETAS ---- */
+    // Existe por causa de um problema real: o PLU gravado na balança pode não ser o mesmo do
+    // cadastro. O banco não revela isso (internamente está consistente) — só bipando a etiqueta
+    // de verdade e comparando com o nome impresso nela. Com emissão fiscal ligada, um PLU
+    // trocado vira produto e valor errados numa NFC-e autorizada.
+    function AcougueConferencia({ showToast }) {
+      const [resumo, setResumo] = useState(null);
+      const [lido, setLido] = useState(null);
+      const [codigo, setCodigo] = useState('');
+      const [obs, setObs] = useState('');
+      const inputRef = useRef(null);
+
+      const load = async () => {
+        const res = await apiCall('GET', '/acougue/plu-audit');
+        if (res.ok) setResumo(res.data);
+      };
+      useEffect(() => { load(); inputRef.current?.focus(); }, []);
+
+      const bipar = async (valor) => {
+        const trimmed = valor.trim();
+        setCodigo('');
+        if (!trimmed) return;
+        const res = await apiCall('GET', `/acougue/products/scan/${encodeURIComponent(trimmed)}`);
+        if (!res.ok) {
+          setLido(null);
+          showToast(res.data?.error || 'Não reconhecido', 'error');
+          inputRef.current?.focus();
+          return;
+        }
+        setLido({ ...res.data, etiqueta: trimmed });
+        setObs('');
+      };
+
+      const responder = async (confere) => {
+        if (!lido) return;
+        const res = await apiCall('POST', `/acougue/products/${lido.product.id}/conferir-plu`,
+          { confere, observacao: confere ? null : (obs || 'Etiqueta não corresponde ao cadastro') });
+        if (res.ok) {
+          showToast(confere ? `${lido.product.name} confirmado` : `${lido.product.name} marcado como divergente`, confere ? 'success' : 'error');
+          setLido(null); setObs(''); load(); inputRef.current?.focus();
+        } else showToast(res.data?.error || 'Erro ao registrar', 'error');
+      };
+
+      if (!resumo) return <AcgSpinner />;
+      const pct = resumo.total ? Math.round(((resumo.conferidos + resumo.divergentes) / resumo.total) * 100) : 0;
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-clipboard-check" title="Conferir Etiquetas"
+            subtitle="Bipe a etiqueta real da balança e confirme se o produto que aparece é o mesmo impresso nela" />
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
+            <AcgCard label="Conferidos" value={String(resumo.conferidos)} icon="fa-circle-check" color="#10b981" bg="rgba(16,185,129,0.12)" />
+            <AcgCard label="Divergentes" value={String(resumo.divergentes)} icon="fa-triangle-exclamation" color="#ef4444" bg="rgba(239,68,68,0.12)" />
+            <AcgCard label="Não conferidos" value={String(resumo.pendentes)} icon="fa-circle-question" color="#f59e0b" bg="rgba(245,158,11,0.12)" />
+            <AcgCard label="Progresso" value={`${pct}%`} icon="fa-list-check" color={ACG_ACCENT} bg={`${ACG_ACCENT}22`} />
+          </div>
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, marginBottom: 20 }}>
+            <label style={{ display: 'block', marginBottom: 14 }}>
+              <span style={{ display: 'block', color: 'var(--bp-text-faint)', fontSize: 12, marginBottom: 6 }}>Bipe a etiqueta</span>
+              <input ref={inputRef} autoFocus value={codigo}
+                onChange={e => setCodigo(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') bipar(codigo); }}
+                placeholder="Aponte o leitor aqui..."
+                style={{ width: '100%', padding: '14px 16px', borderRadius: 10, border: `2px solid ${ACG_ACCENT}55`, background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 16, fontFamily: 'DM Mono, monospace', boxSizing: 'border-box' }} />
+            </label>
+
+            {lido ? (
+              <div>
+                <div style={{ background: 'var(--bp-card)', border: `1px solid ${ACG_ACCENT}44`, borderRadius: 12, padding: 18, marginBottom: 14 }}>
+                  <div style={{ color: 'var(--bp-text-faint)', fontSize: 10, letterSpacing: 1, marginBottom: 6 }}>O SISTEMA ENTENDEU</div>
+                  <div className="syne" style={{ color: 'var(--bp-text)', fontSize: 26, fontWeight: 800, lineHeight: 1.1, marginBottom: 8 }}>{lido.product.name}</div>
+                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', color: 'var(--bp-text-secondary)', fontSize: 13 }}>
+                    <span>PLU <strong style={{ color: ACG_ACCENT, fontFamily: 'DM Mono, monospace' }}>{lido.scan?.scaleCode || '—'}</strong></span>
+                    <span>{fmtCur(lido.product.price)}/{lido.product.unit}</span>
+                    <span>{Number(lido.quantity).toFixed(3).replace('.', ',')} {lido.product.unit}</span>
+                    <span>total <strong>{fmtCur(lido.quantity * lido.product.price)}</strong></span>
+                  </div>
+                </div>
+
+                <p style={{ color: 'var(--bp-text-secondary)', fontSize: 13, margin: '0 0 12px' }}>
+                  Esse nome é o mesmo que está <strong>impresso na etiqueta</strong>?
+                </p>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <AcgButton onClick={() => responder(true)}><i className="fas fa-check" style={{ marginRight: 6 }}></i>Confere</AcgButton>
+                  <AcgButton variant="ghost" onClick={() => responder(false)} style={{ borderColor: '#ef4444', color: '#ef4444' }}>
+                    <i className="fas fa-xmark" style={{ marginRight: 6 }}></i>Não confere
+                  </AcgButton>
+                  <input value={obs} onChange={e => setObs(e.target.value)}
+                    placeholder="o que está escrito na etiqueta?"
+                    style={{ flex: 1, minWidth: 200, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 13 }} />
+                </div>
+              </div>
+            ) : (
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 13, textAlign: 'center', padding: '20px 0', margin: 0 }}>
+                Pegue uma etiqueta impressa pela balança e bipe acima.
+              </p>
+            )}
+          </div>
+
+          {resumo.lista_divergentes.length > 0 && (
+            <div>
+              <p className="syne" style={{ color: '#ef4444', fontWeight: 700, fontSize: 14, margin: '0 0 10px' }}>
+                <i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>
+                Divergentes — corrija antes de vender com nota fiscal
+              </p>
+              <AcgTable
+                emptyLabel="Nenhuma divergência"
+                columns={[
+                  { key: 'scale_code', label: 'PLU' },
+                  { key: 'name', label: 'Sistema diz que é' },
+                  { key: 'price', label: 'Preço', align: 'right', render: r => fmtCur(r.price) },
+                  { key: 'plu_observacao', label: 'Etiqueta diz', render: r => r.plu_observacao || '—' },
+                ]}
+                rows={resumo.lista_divergentes}
+              />
+            </div>
+          )}
         </div>
       );
     }
@@ -1311,6 +1437,81 @@
     }
 
     /* ---- EMISSÃO DE NOTA (NF-e via Focus NFe) ---- */
+    /* ---- CONTINGÊNCIA OFFLINE ---- */
+    // Nota emitida em contingência é dívida fiscal aberta: o cupom já foi entregue ao cliente,
+    // mas a SEFAZ ainda não recebeu. A lei dá prazo para transmitir e passar dele gera multa —
+    // por isso isto aparece como alerta vermelho no topo, não escondido num relatório.
+    function AcougueContingencia({ showToast, onMudou }) {
+      const [dados, setDados] = useState(null);
+      const [efetivando, setEfetivando] = useState(null);
+
+      const load = async () => {
+        const res = await apiCall('GET', '/acougue/nfce/contingencia');
+        if (res.ok) setDados(res.data);
+      };
+      useEffect(() => { load(); }, []);
+
+      const efetivar = async (id) => {
+        setEfetivando(id);
+        const res = await apiCall('POST', `/acougue/nfce/${id}/efetivar`);
+        setEfetivando(null);
+        if (res.ok) {
+          showToast(res.data.mensagem, res.data.efetivada ? 'success' : 'info');
+          load(); onMudou?.();
+        } else showToast(res.data?.error || 'Erro ao efetivar', 'error');
+      };
+
+      const efetivarTodas = async () => {
+        for (const n of dados.pendentes) await efetivar(n.id);
+      };
+
+      // Sem pendências não mostra nada: um painel vazio permanente vira ruído e o operador
+      // para de olhar justamente quando aparecer algo de verdade.
+      if (!dados || dados.total === 0) return null;
+
+      const critico = dados.mais_antiga_horas >= 20;
+      return (
+        <div style={{
+          background: critico ? 'rgba(239,68,68,0.10)' : 'rgba(245,158,11,0.10)',
+          border: `1px solid ${critico ? 'rgba(239,68,68,0.4)' : 'rgba(245,158,11,0.4)'}`,
+          borderRadius: 14, padding: 18, marginBottom: 20,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
+            <div>
+              <p className="syne" style={{ color: critico ? '#ef4444' : '#f59e0b', fontWeight: 700, fontSize: 15, margin: '0 0 3px' }}>
+                <i className="fas fa-triangle-exclamation" style={{ marginRight: 8 }}></i>
+                {dados.total} nota(s) em contingência aguardando transmissão
+              </p>
+              <p style={{ color: 'var(--bp-text-secondary)', fontSize: 12, margin: 0 }}>
+                Emitidas com a SEFAZ fora do ar. O cliente já levou o cupom, mas a SEFAZ ainda não recebeu.
+                A mais antiga tem <strong>{dados.mais_antiga_horas}h</strong>.
+              </p>
+            </div>
+            <AcgButton onClick={efetivarTodas} disabled={efetivando !== null}>
+              <i className="fas fa-paper-plane" style={{ marginRight: 6 }}></i>Transmitir todas
+            </AcgButton>
+          </div>
+
+          <AcgTable
+            emptyLabel="Nenhuma"
+            columns={[
+              { key: 'sale_number', label: 'Venda', render: r => r.sale_number || '—' },
+              { key: 'numero', label: 'Nota', render: r => `${r.numero || '?'}/${r.serie || '?'}` },
+              { key: 'total_value', label: 'Valor', align: 'right', render: r => fmtCur(r.total_value) },
+              { key: 'created_at', label: 'Emitida em', render: r => new Date(r.created_at).toLocaleString('pt-BR') },
+              { key: 'acao', label: '', align: 'right', render: r => (
+                <button onClick={() => efetivar(r.id)} disabled={efetivando === r.id}
+                  style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12 }}>
+                  {efetivando === r.id ? 'enviando...' : 'transmitir'}
+                </button>
+              ) },
+            ]}
+            rows={dados.pendentes}
+          />
+        </div>
+      );
+    }
+
     function AcougueNotas({ showToast }) {
       const [notas, setNotas] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -1369,6 +1570,8 @@
             <AcgSectionTitle icon="fa-file-invoice" title="Emissão de Nota" subtitle="Notas de entrada (compra de carcaça) e saída (venda)" />
             <AcgButton onClick={() => setShowForm(s => !s)}><i className="fas fa-plus" style={{ marginRight: 6 }}></i>Nova nota</AcgButton>
           </div>
+
+          <AcougueContingencia showToast={showToast} onMudou={load} />
 
           {!configured && (
             <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 12, padding: '14px 16px', marginBottom: 20, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
@@ -1944,19 +2147,6 @@
               <AcgInput label="CEP" value={form.cep || ''} onChange={e => setForm({ ...form, cep: e.target.value })} />
             </div>
 
-            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 14px' }}>Tributação</p>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-              <AcgSelect label="Regime tributário" value={form.regime_tributario || 'lucro_real'} onChange={e => setForm({ ...form, regime_tributario: e.target.value })}>
-                <option value="lucro_real">Lucro Real (não-cumulativo)</option>
-                <option value="lucro_presumido">Lucro Presumido (cumulativo)</option>
-              </AcgSelect>
-              <AcgInput label="Alíquota PIS (%)" type="number" step="0.01" value={form.pis_rate || ''} onChange={e => setForm({ ...form, pis_rate: e.target.value })} />
-              <AcgInput label="Alíquota COFINS (%)" type="number" step="0.01" value={form.cofins_rate || ''} onChange={e => setForm({ ...form, cofins_rate: e.target.value })} />
-            </div>
-            {form.regime_tributario === 'lucro_presumido' && (
-              <p style={{ color: '#f59e0b', fontSize: 12, margin: '0 0 12px' }}><i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>No regime cumulativo (Lucro Presumido) não há aproveitamento de créditos — as alíquotas padrão são 0,65% (PIS) e 3% (COFINS). O cálculo de apuração deste sistema assume créditos sobre entradas; ajuste com seu contador antes de usar os valores para recolhimento.</p>
-            )}
-
             <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 4px' }}>Atalhos do caixa</p>
             <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', lineHeight: 1.5 }}>
               Clique num campo e aperte a tecla que quer usar. Evite F1 (ajuda do navegador) e F11 (tela cheia),
@@ -1983,6 +2173,19 @@
                 );
               })}
             </div>
+
+            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 14px' }}>Tributação</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <AcgSelect label="Regime tributário" value={form.regime_tributario || 'lucro_real'} onChange={e => setForm({ ...form, regime_tributario: e.target.value })}>
+                <option value="lucro_real">Lucro Real (não-cumulativo)</option>
+                <option value="lucro_presumido">Lucro Presumido (cumulativo)</option>
+              </AcgSelect>
+              <AcgInput label="Alíquota PIS (%)" type="number" step="0.01" value={form.pis_rate || ''} onChange={e => setForm({ ...form, pis_rate: e.target.value })} />
+              <AcgInput label="Alíquota COFINS (%)" type="number" step="0.01" value={form.cofins_rate || ''} onChange={e => setForm({ ...form, cofins_rate: e.target.value })} />
+            </div>
+            {form.regime_tributario === 'lucro_presumido' && (
+              <p style={{ color: '#f59e0b', fontSize: 12, margin: '0 0 12px' }}><i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>No regime cumulativo (Lucro Presumido) não há aproveitamento de créditos — as alíquotas padrão são 0,65% (PIS) e 3% (COFINS). O cálculo de apuração deste sistema assume créditos sobre entradas; ajuste com seu contador antes de usar os valores para recolhimento.</p>
+            )}
 
             <AcgButton type="submit" disabled={saving}>{saving ? 'Salvando...' : 'Salvar configurações'}</AcgButton>
           </form>
@@ -2071,6 +2274,7 @@
                 : activeView === 'rendimento' ? <AcougueRendimento showToast={showToast} />
                 : activeView === 'saida' ? <AcougueSaida showToast={showToast} />
                 : activeView === 'produtos' ? <AcougueProdutos showToast={showToast} />
+                : activeView === 'conferencia' ? <AcougueConferencia showToast={showToast} />
                 : activeView === 'caixa' ? <AcougueCaixa showToast={showToast} />
                 : activeView === 'notas' ? <AcougueNotas showToast={showToast} />
                 : activeView === 'impostos' ? <AcougueImpostos showToast={showToast} />

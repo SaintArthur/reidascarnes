@@ -3,9 +3,9 @@
 // pacote NÃO é um EAN comum: o próprio código carrega quanto aquele pacote pesa. Um EAN-13
 // de balança tem esta cara:
 //
-//     2 000012 00588 4
-//     │ │      │     └─ dígito verificador (DV)
-//     │ │      └─ VALOR: peso em gramas (00588 = 0,588 kg) ou preço em centavos
+//     2 0007 0003522 5
+//     │ │    │       └─ dígito verificador (DV)
+//     │ │    └─ VALOR: preço em centavos (0003522 = R$ 35,22) ou peso em gramas
 //     │ └─ CÓDIGO do produto na balança (PLU) — o que liga a etiqueta ao cadastro
 //     └─ PREFIXO de balança (2 no padrão brasileiro; a faixa 20-29 é reservada
 //        justamente para uso interno da loja, então nunca conflita com EAN de fábrica)
@@ -19,10 +19,15 @@
 // contra leitura torta do bipador — o que importa num caixa, onde um dígito trocado viraria
 // preço errado no cupom.
 
-// Layout conferido numa etiqueta real da balança do Rei das Carnes (28/07/2026):
+// Layout deduzido da etiqueta real da balança do Rei das Carnes (revisado em 21/09/2026):
 //
 //     alcatra / PESO LÍQ. 0,588kg / R$/kg 59,90 / TOTAL R$ 35,22
-//     código: 2 000700 03522 5   →  PLU 700, valor 3522 = R$ 35,22
+//     código: 2 0007 0003522 5   →  PLU 7 (Alcatra c/ picanha), valor 3522 = R$ 35,22
+//
+// CUIDADO: os zeros à esquerda tornam o VALOR igual em vários layouts (R$ 35,22 sai tanto
+// lendo 4, 5 ou 6 dígitos de PLU), mas o PLU muda — 7, 70 ou 700. Só o PLU 7 aponta para uma
+// alcatra; 70 é um energético e 700 é bife ancho. Confirmado também por exclusão: todo produto
+// vendido por kg tem PLU <= 8000, ou seja, cabe em 4 dígitos.
 //
 // Ou seja: esta balança grava o PREÇO TOTAL em centavos, não o peso. O peso é deduzido no
 // servidor dividindo pelo R$/kg do cadastro. As três partes configuráveis SEMPRE têm que
@@ -30,8 +35,8 @@
 // em vez de decodificar valor errado.
 const DEFAULT_CONFIG = {
   prefix: '2',
-  codeDigits: 6,
-  valueDigits: 5,
+  codeDigits: 4,
+  valueDigits: 7,
   valueType: 'preco_centavos', // 'peso_g' = gramas | 'preco_centavos' = centavos
 };
 

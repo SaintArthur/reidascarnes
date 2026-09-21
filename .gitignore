@@ -8,3 +8,4 @@ data/
 barberpro-final/
 *.pdf
 .env.backup-*
+revisao-fiscal.csv

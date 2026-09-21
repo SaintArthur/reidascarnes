@@ -19,6 +19,8 @@ require('dotenv').config();
 const { t, reqLang, SUPPORTED_LANGS, weekdayName } = require('./i18n-server');
 const focusNfe = require('./focus-nfe');
 const scaleBarcode = require('./scale-barcode');
+const nfeXml = require('./nfe-xml');
+const sped = require('./sped');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -457,6 +459,87 @@ async function initDatabase() {
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_acougue_products_scale_code
     ON acougue_products(scale_code) WHERE scale_code IS NOT NULL AND active = 1`);
 
+  // ─── Entrada de notas (NF-e de compra do fornecedor) ──────────────────────
+  // Guardamos o XML inteiro, não só os campos extraídos: o SPED e uma eventual fiscalização
+  // pedem o arquivo original, e reprocessar o XML guardado é a única forma de corrigir um
+  // erro de importação sem pedir o arquivo ao fornecedor de novo.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_purchase_invoices (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    chave_acesso TEXT UNIQUE,
+    numero TEXT,
+    serie TEXT,
+    modelo TEXT DEFAULT '55',
+    emit_cnpj TEXT,
+    emit_nome TEXT,
+    emit_uf TEXT,
+    data_emissao DATE,
+    valor_total REAL NOT NULL DEFAULT 0,
+    valor_produtos REAL DEFAULT 0,
+    valor_icms REAL DEFAULT 0,
+    valor_pis REAL DEFAULT 0,
+    valor_cofins REAL DEFAULT 0,
+    xml TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_purchase_items (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    invoice_id INTEGER NOT NULL REFERENCES acougue_purchase_invoices(id) ON DELETE CASCADE,
+    -- Fica nulo quando o item da nota do fornecedor não casa com nenhum produto nosso; o
+    -- estoque só é movimentado quando há vínculo, para não inventar saldo de item errado.
+    product_id INTEGER REFERENCES acougue_products(id) ON DELETE SET NULL,
+    numero_item INTEGER,
+    codigo TEXT,
+    ean TEXT,
+    descricao TEXT NOT NULL,
+    ncm TEXT,
+    cfop TEXT,
+    unidade TEXT,
+    quantidade REAL NOT NULL,
+    valor_unitario REAL NOT NULL,
+    valor_total REAL NOT NULL,
+    icms_cst TEXT,
+    icms_valor REAL DEFAULT 0,
+    pis_cst TEXT,
+    pis_valor REAL DEFAULT 0,
+    cofins_cst TEXT,
+    cofins_valor REAL DEFAULT 0
+  )`);
+
+  // ─── Livro de movimentação de estoque (controle interno) ───────────────────
+  // Toda alteração de saldo passa a deixar rastro aqui: entrada por nota, desossa, venda no
+  // caixa, quebra na câmara e ajuste manual. Sem esse livro, "sumiu 12 kg de picanha" é uma
+  // discussão sem prova — com ele dá pra apontar exatamente quando e por quê o saldo mudou.
+  //
+  // `quantidade` é sempre em kg (ou unidades, conforme o produto) e traz SINAL: positivo
+  // entra, negativo sai. Somar a coluna reconstrói o saldo de qualquer produto em qualquer data.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_stock_movements (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INTEGER REFERENCES acougue_products(id) ON DELETE SET NULL,
+    carcass_entry_id INTEGER REFERENCES acougue_carcass_entries(id) ON DELETE SET NULL,
+    tipo TEXT NOT NULL,
+    quantidade REAL NOT NULL,
+    saldo_apos REAL,
+    motivo TEXT,
+    ref_type TEXT,
+    ref_id INTEGER,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_stock_mov_product ON acougue_stock_movements(product_id, created_at DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_stock_mov_carcass ON acougue_stock_movements(carcass_entry_id)');
+
+  // ─── Câmara fria ───────────────────────────────────────────────────────────
+  // Carne perde peso parada na câmara (evaporação). É perda real de mercadoria: entrou 250 kg
+  // de carcaça, saem 247 kg de cortes, e a diferença não é roubo nem erro de balança. Sem
+  // registrar isso, o estoque acusa sobra que não existe e o rendimento por carcaça sai errado.
+  for (const col of [
+    'chamber_in_at TIMESTAMP', 'chamber_out_at TIMESTAMP', 'weight_out_kg REAL', 'chamber_notes TEXT',
+  ]) {
+    await pool.query(`ALTER TABLE acougue_carcass_entries ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+
   // Migrações (colunas adicionadas depois do schema inicial) — idempotentes via IF NOT EXISTS,
   // sem precisar do try/catch de "duplicate column" que o sqlite3 exigia.
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS specialty TEXT');
@@ -585,9 +668,22 @@ async function initDatabase() {
     // Rendimento peso vivo → carcaça (% do peso vivo do boi). Valores de referência típicos do
     // setor — variam de verdade por raça, acabamento de gordura e tempo de jejum do animal, por
     // isso ficam editáveis em Configurações.
+    // Quebra de peso na câmara fria, em % por dia. O valor abaixo é uma referência de setor
+    // para carcaça bovina resfriada em câmara bem regulada (perda de água por evaporação, em
+    // geral 0,5%–2% nas primeiras 24h, caindo depois). O número REAL desta câmara depende de
+    // temperatura, umidade, ventilação e de a peça estar coberta ou não — por isso é editável
+    // em Configurações, e o sistema mostra sempre o esperado ao lado do real medido.
+    ['acougue_shrink_pct_day', '0.8'],
     // Layout da etiqueta da balança (ver scale-barcode.js), conferido numa etiqueta real:
     // 2 + PLU de 6 dígitos + preço total em centavos de 5 dígitos + DV. Se a balança for
     // reprogramada (ou trocada por outra que grave PESO), é só ajustar em Configurações.
+    // Teclas de atalho do caixa. O operador de açougue trabalha com as duas mãos ocupadas
+    // (leitor numa, embalagem na outra) — tirar a mão pro mouse a cada item é o que trava a
+    // fila. Guardado como JSON para o dono remapear em Configurações sem mexer no código.
+    ['acougue_hotkeys', JSON.stringify({
+      foco_codigo: 'F2', cpf_nota: 'F4', finalizar: 'F5', reimprimir: 'F6',
+      cancelar_venda: 'F9', remover_item: 'F10', suspender: 'F12',
+    })],
     ['acougue_scale_prefix', '2'],
     ['acougue_scale_code_digits', '6'],
     ['acougue_scale_value_digits', '5'],
@@ -2161,6 +2257,8 @@ function monthRange(month, year) {
   return { start, end };
 }
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Peso vai a 3 casas porque a balança do açougue trabalha em gramas (0,588 kg).
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 
 async function getAcougueSettingsMap() {
   const rows = await db.all("SELECT key, value FROM settings WHERE key LIKE 'acougue_%'", []);
@@ -2175,37 +2273,133 @@ async function getAcougueSettingsMap() {
 // cortes com destino 'venda_direta' (atacado, fora do caixa) + vendas do caixa. Cortes que só
 // vão pro estoque (destino 'estoque') não contam ainda, porque a saída de fato acontece depois,
 // quando o produto é vendido no caixa — contá-los nos dois pontos duplicaria a base de cálculo.
+// CSTs de PIS/COFINS que efetivamente geram débito na saída. Os demais (04 monofásico,
+// 05 ST, 06 alíquota zero, 07 isenta, 08 sem incidência, 09 suspensão) têm receita que entra
+// na apuração como NÃO tributada — aplicar alíquota neles infla o imposto a recolher.
+//
+// Isso não é detalhe: no cadastro do Rei das Carnes a maioria dos cortes é CST 06 ou 04
+// (carne bovina tem alíquota zero pela Lei 10.925/2004), então tratar tudo como tributado
+// faz o sistema apurar imposto que a empresa não deve.
+const CST_PIS_COFINS_TRIBUTADO = new Set(['01', '02']);
+
+// Registra uma movimentação no livro de estoque. Recebe o `client` da transação em curso para
+// que o lançamento nasça e morra junto com a operação que o gerou — movimentação gravada de
+// uma venda que deu rollback seria pior que não registrar nada.
+async function registrarMovimento(client, { productId = null, carcassEntryId = null, tipo, quantidade, motivo = null, refType = null, refId = null, userId = null }) {
+  let saldoApos = null;
+  if (productId) {
+    const { rows } = await client.query('SELECT stock_qty FROM acougue_products WHERE id = $1', [productId]);
+    saldoApos = rows[0] ? round3(rows[0].stock_qty) : null;
+  }
+  await client.query(
+    `INSERT INTO acougue_stock_movements (product_id, carcass_entry_id, tipo, quantidade, saldo_apos, motivo, ref_type, ref_id, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [productId, carcassEntryId, tipo, round3(quantidade), saldoApos, motivo, refType, refId, userId]);
+}
+
+// Normaliza o CST vindo do cadastro: as planilhas trazem "1", "01" e "001" para a mesma coisa.
+function normalizaCst(valor) {
+  const digitos = String(valor ?? '').replace(/\D/g, '');
+  return digitos ? digitos.padStart(2, '0').slice(-2) : null;
+}
+
 async function calcApuracao(month, year) {
   const { start, end } = monthRange(month, year);
   const settings = await getAcougueSettingsMap();
   const pisRate = (Number(settings.pis_rate) || 1.65) / 100;
   const cofinsRate = (Number(settings.cofins_rate) || 7.6) / 100;
+  // No regime cumulativo (Lucro Presumido) não existe aproveitamento de crédito sobre
+  // entradas. Antes o sistema calculava crédito de qualquer jeito e só avisava na tela —
+  // o número saía errado para quem estivesse nesse regime.
+  const cumulativo = settings.regime_tributario === 'lucro_presumido';
 
-  const { rows: [{ total: entradasTotal }] } = await pool.query(
-    `SELECT COALESCE(SUM(total_value), 0) as total FROM acougue_carcass_entries WHERE entry_date >= $1 AND entry_date < $2`,
-    [start, end]
-  );
+  /* ── DÉBITO: saídas, item a item, respeitando o CST de cada produto ── */
+  const itensVendidos = await db.all(
+    `SELECT si.subtotal, p.pis_cst, p.cofins_cst
+     FROM acougue_sale_items si
+     JOIN acougue_sales s ON s.id = si.sale_id
+     LEFT JOIN acougue_products p ON p.id = si.product_id
+     WHERE s.created_at >= ? AND s.created_at < ? AND s.status = 'concluida'`, [start, end]);
+
+  let base_pis_tributada = 0, base_pis_nao_tributada = 0;
+  let base_cofins_tributada = 0, base_cofins_nao_tributada = 0;
+  let itens_sem_cst = 0;
+
+  for (const item of itensVendidos) {
+    const valor = Number(item.subtotal) || 0;
+    const pisCst = normalizaCst(item.pis_cst);
+    const cofinsCst = normalizaCst(item.cofins_cst);
+    // Produto sem CST cadastrado é tratado como TRIBUTADO de propósito: subestimar imposto
+    // é o erro caro. O contador vê a contagem no relatório e corrige o cadastro.
+    if (!pisCst || !cofinsCst) itens_sem_cst++;
+
+    if (!pisCst || CST_PIS_COFINS_TRIBUTADO.has(pisCst)) base_pis_tributada += valor;
+    else base_pis_nao_tributada += valor;
+
+    if (!cofinsCst || CST_PIS_COFINS_TRIBUTADO.has(cofinsCst)) base_cofins_tributada += valor;
+    else base_cofins_nao_tributada += valor;
+  }
+
+  // Cortes vendidos direto (atacado, fora do caixa). Não passam por produto cadastrado, então
+  // não há CST — entram como tributados, que é o tratamento conservador.
   const { rows: [{ total: cortesVendaTotal }] } = await pool.query(
-    `SELECT COALESCE(SUM(total_value), 0) as total FROM acougue_cuts WHERE output_date >= $1 AND output_date < $2 AND destination = 'venda_direta'`,
-    [start, end]
-  );
-  const { rows: [{ total: caixaTotal }] } = await pool.query(
-    `SELECT COALESCE(SUM(total_value), 0) as total FROM acougue_sales WHERE created_at >= $1 AND created_at < $2 AND status = 'concluida'`,
-    [start, end]
-  );
+    `SELECT COALESCE(SUM(total_value), 0) as total FROM acougue_cuts
+     WHERE output_date >= $1 AND output_date < $2 AND destination = 'venda_direta'`, [start, end]);
+  const cortes_venda_direta = Number(cortesVendaTotal);
+  base_pis_tributada += cortes_venda_direta;
+  base_cofins_tributada += cortes_venda_direta;
 
-  const entradas_total = Number(entradasTotal);
-  const saidas_total = Number(cortesVendaTotal) + Number(caixaTotal);
-  const pis_credit = round2(entradas_total * pisRate);
-  const pis_debit = round2(saidas_total * pisRate);
-  const cofins_credit = round2(entradas_total * cofinsRate);
-  const cofins_debit = round2(saidas_total * cofinsRate);
+  /* ── CRÉDITO: preferir o valor real das notas de entrada ── */
+  // Nota importada por XML traz o PIS/COFINS que o fornecedor efetivamente destacou. Esse é o
+  // crédito documentado — muito melhor que estimar aplicando alíquota sobre o valor da compra.
+  const { rows: [notasXml] } = await pool.query(
+    `SELECT COALESCE(SUM(valor_pis), 0) AS pis, COALESCE(SUM(valor_cofins), 0) AS cofins,
+            COALESCE(SUM(valor_total), 0) AS total, COUNT(*)::int AS qtd
+     FROM acougue_purchase_invoices WHERE data_emissao >= $1 AND data_emissao < $2`, [start, end]);
+
+  // Entradas de carcaça lançadas à mão (sem XML) continuam estimadas pela alíquota, porque não
+  // há documento com valor destacado. Fica separado no retorno para o contador enxergar quanto
+  // do crédito é documentado e quanto é estimativa.
+  const { rows: [{ total: entradasManuais }] } = await pool.query(
+    `SELECT COALESCE(SUM(total_value), 0) as total FROM acougue_carcass_entries
+     WHERE entry_date >= $1 AND entry_date < $2`, [start, end]);
+
+  const entradas_com_nota = Number(notasXml.total);
+  const entradas_manuais = Number(entradasManuais);
+  const pis_credit_documentado = cumulativo ? 0 : round2(Number(notasXml.pis));
+  const cofins_credit_documentado = cumulativo ? 0 : round2(Number(notasXml.cofins));
+  const pis_credit_estimado = cumulativo ? 0 : round2(entradas_manuais * pisRate);
+  const cofins_credit_estimado = cumulativo ? 0 : round2(entradas_manuais * cofinsRate);
+
+  const pis_debit = round2(base_pis_tributada * pisRate);
+  const cofins_debit = round2(base_cofins_tributada * cofinsRate);
+  const pis_credit = round2(pis_credit_documentado + pis_credit_estimado);
+  const cofins_credit = round2(cofins_credit_documentado + cofins_credit_estimado);
 
   return {
-    month: Number(month), year: Number(year), entradas_total, saidas_total,
+    month: Number(month), year: Number(year),
+    regime: cumulativo ? 'lucro_presumido' : 'lucro_real',
+    cumulativo,
+    entradas_total: round2(entradas_com_nota + entradas_manuais),
+    entradas_com_nota: round2(entradas_com_nota),
+    entradas_manuais: round2(entradas_manuais),
+    notas_entrada_qtd: notasXml.qtd,
+    saidas_total: round2(base_pis_tributada + base_pis_nao_tributada),
+    base_pis_tributada: round2(base_pis_tributada),
+    base_pis_nao_tributada: round2(base_pis_nao_tributada),
+    base_cofins_tributada: round2(base_cofins_tributada),
+    base_cofins_nao_tributada: round2(base_cofins_nao_tributada),
+    cortes_venda_direta: round2(cortes_venda_direta),
+    itens_sem_cst,
     pis_rate: round2(pisRate * 100), cofins_rate: round2(cofinsRate * 100),
-    pis_credit, pis_debit, pis_due: round2(Math.max(0, pis_debit - pis_credit)),
-    cofins_credit, cofins_debit, cofins_due: round2(Math.max(0, cofins_debit - cofins_credit)),
+    pis_credit, pis_credit_documentado, pis_credit_estimado,
+    pis_debit, pis_due: round2(Math.max(0, pis_debit - pis_credit)),
+    cofins_credit, cofins_credit_documentado, cofins_credit_estimado,
+    cofins_debit, cofins_due: round2(Math.max(0, cofins_debit - cofins_credit)),
+    // Saldo credor não some: a lei permite carregar para o período seguinte. Antes o
+    // Math.max(0, ...) simplesmente descartava esse valor sem mostrar em lugar nenhum.
+    pis_saldo_credor: round2(Math.max(0, pis_credit - pis_debit)),
+    cofins_saldo_credor: round2(Math.max(0, cofins_credit - cofins_debit)),
   };
 }
 
@@ -2531,6 +2725,9 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
         [sale.id, ri.product.id, ri.product.name, ri.product.barcode, ri.quantity, ri.product.price, ri.subtotal]
       );
       await client.query('UPDATE acougue_products SET stock_qty = stock_qty - $1 WHERE id = $2', [ri.quantity, ri.product.id]);
+      await registrarMovimento(client, {
+        productId: ri.product.id, tipo: 'venda', quantidade: -ri.quantity,
+        motivo: `Venda ${saleNumber}`, refType: 'venda', refId: sale.id, userId: req.user.id });
       savedItems.push({ product_id: ri.product.id, name: ri.product.name, barcode: ri.product.barcode, quantity: ri.quantity, unit_price: ri.product.price, subtotal: ri.subtotal });
     }
     await client.query('COMMIT');
@@ -2557,8 +2754,18 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
     if (!sale) return res.status(404).json({ error: t(lang, 'Venda não encontrada') });
     if (sale.status === 'cancelada') return res.status(409).json({ error: 'Esta venda está cancelada — não é possível emitir nota.' });
 
-    const existing = await db.get("SELECT * FROM acougue_invoices WHERE ref_type = 'venda' AND ref_id = ? AND status IN ('autorizada','processando')", [sale.id]);
-    if (existing) return res.status(409).json({ error: `Esta venda já tem a nota ${existing.numero || existing.id} (${existing.status}).`, invoice: existing });
+    // 'rascunho' entra na trava junto com autorizada/processando: sem o token da Focus toda
+    // emissão vira rascunho, e sem isso apertar Finalizar duas vezes (ou o operador insistir
+    // porque "não imprimiu") criava uma nota nova a cada clique para a MESMA venda. Só status
+    // 'erro' libera nova tentativa, que é justamente o caso em que reemitir faz sentido.
+    const existing = await db.get(
+      "SELECT * FROM acougue_invoices WHERE ref_type = 'venda' AND ref_id = ? AND status IN ('autorizada','processando','rascunho')", [sale.id]);
+    if (existing) {
+      return res.status(409).json({
+        error: `Esta venda já tem nota ${existing.numero ? `nº ${existing.numero}` : `em ${existing.status}`}.`,
+        invoice: existing,
+      });
+    }
 
     const items = await db.all(
       `SELECT si.*, p.ncm, p.cfop, p.cest, p.origem, p.icms_cst, p.icms_aliquota, p.icms_reducao_bc, p.pis_cst, p.cofins_cst, p.unit
@@ -2639,7 +2846,12 @@ app.post('/api/acougue/sales/:id/cancel', ...acougueOnly, async (req, res) => {
     if (sale.status === 'cancelada') { await client.query('ROLLBACK'); return res.status(409).json({ error: t(reqLang(req), 'Venda já está cancelada') }); }
     const { rows: saleItems } = await client.query('SELECT * FROM acougue_sale_items WHERE sale_id = $1', [sale.id]);
     for (const it of saleItems) {
-      if (it.product_id) await client.query('UPDATE acougue_products SET stock_qty = stock_qty + $1 WHERE id = $2', [it.quantity, it.product_id]);
+      if (it.product_id) {
+        await client.query('UPDATE acougue_products SET stock_qty = stock_qty + $1 WHERE id = $2', [it.quantity, it.product_id]);
+        await registrarMovimento(client, {
+          productId: it.product_id, tipo: 'cancelamento_venda', quantidade: it.quantity,
+          motivo: `Cancelamento da venda ${sale.sale_number}`, refType: 'venda', refId: sale.id, userId: req.user.id });
+      }
     }
     await client.query("UPDATE acougue_sales SET status = 'cancelada' WHERE id = $1", [sale.id]);
     await client.query('COMMIT');
@@ -2786,6 +2998,332 @@ app.post('/api/acougue/taxes/periods/close', ...acougueOnly, async (req, res) =>
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+/* ---- Entrada de notas (XML de NF-e do fornecedor) ---- */
+app.get('/api/acougue/purchases', ...acougueOnly, async (req, res) => {
+  try {
+    res.json(await db.all(
+      `SELECT id, chave_acesso, numero, serie, emit_nome, emit_cnpj, data_emissao,
+              valor_total, valor_pis, valor_cofins,
+              (SELECT COUNT(*) FROM acougue_purchase_items i WHERE i.invoice_id = acougue_purchase_invoices.id) AS itens
+       FROM acougue_purchase_invoices ORDER BY data_emissao DESC, id DESC LIMIT 200`, []));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/acougue/purchases/:id', ...acougueOnly, async (req, res) => {
+  try {
+    const nota = await db.get('SELECT * FROM acougue_purchase_invoices WHERE id = ?', [req.params.id]);
+    if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
+    const itens = await db.all('SELECT * FROM acougue_purchase_items WHERE invoice_id = ? ORDER BY numero_item', [req.params.id]);
+    // O XML é grande e só interessa no download; não vai na listagem do detalhe.
+    delete nota.xml;
+    res.json({ ...nota, itens });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Importa o XML da nota do fornecedor. O corpo é o texto do XML (Content-Type: text/xml) ou
+// { xml: "..." } em JSON — o front manda o conteúdo do arquivo que o usuário selecionou.
+app.post('/api/acougue/purchases/xml', ...acougueOnly, async (req, res) => {
+  const xml = typeof req.body === 'string' ? req.body : req.body?.xml;
+  if (!xml || typeof xml !== 'string') {
+    return res.status(400).json({ error: 'Envie o conteúdo do arquivo XML da nota.' });
+  }
+
+  let nota;
+  try {
+    nota = nfeXml.parseNFeXml(xml);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, code: err.code });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // A chave de acesso é única por nota em todo o Brasil — é ela que impede o mesmo arquivo
+    // de entrar duas vezes e dobrar o estoque, erro clássico de quem importa XML.
+    if (nota.chave_acesso) {
+      const { rows: jaExiste } = await client.query(
+        'SELECT id, numero FROM acougue_purchase_invoices WHERE chave_acesso = $1', [nota.chave_acesso]);
+      if (jaExiste.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `Esta nota já foi importada (nº ${jaExiste[0].numero}).`, invoice_id: jaExiste[0].id });
+      }
+    }
+
+    const { rows: [inv] } = await client.query(
+      `INSERT INTO acougue_purchase_invoices
+         (chave_acesso, numero, serie, modelo, emit_cnpj, emit_nome, emit_uf, data_emissao,
+          valor_total, valor_produtos, valor_icms, valor_pis, valor_cofins, xml, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+      [nota.chave_acesso, nota.numero, nota.serie, nota.modelo, nota.emitente.cnpj, nota.emitente.nome,
+       nota.emitente.uf, nota.data_emissao, nota.valor_total, nota.valor_produtos, nota.valor_icms,
+       nota.valor_pis, nota.valor_cofins, xml, req.user.id]);
+
+    let vinculados = 0;
+    for (const item of nota.itens) {
+      // Casa o item da nota com o nosso cadastro pelo EAN (único critério confiável — o código
+      // do fornecedor é interno dele e o nome varia). Sem casar, o item entra registrado mas
+      // não mexe no estoque, e alguém associa depois.
+      let produto = null;
+      if (item.ean) {
+        produto = await client.query('SELECT id FROM acougue_products WHERE barcode = $1 AND active = 1', [item.ean])
+          .then(r => r.rows[0] || null);
+      }
+
+      await client.query(
+        `INSERT INTO acougue_purchase_items
+           (invoice_id, product_id, numero_item, codigo, ean, descricao, ncm, cfop, unidade,
+            quantidade, valor_unitario, valor_total, icms_cst, icms_valor, pis_cst, pis_valor, cofins_cst, cofins_valor)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [inv.id, produto?.id || null, item.numero_item, item.codigo, item.ean, item.descricao,
+         item.ncm, item.cfop, item.unidade, item.quantidade, item.valor_unitario, item.valor_total,
+         item.icms_cst, item.icms_valor, item.pis_cst, item.pis_valor, item.cofins_cst, item.cofins_valor]);
+
+      if (produto) {
+        await client.query('UPDATE acougue_products SET stock_qty = stock_qty + $1 WHERE id = $2', [item.quantidade, produto.id]);
+        await registrarMovimento(client, {
+          productId: produto.id, tipo: 'entrada_nota', quantidade: item.quantidade,
+          motivo: `NF-e ${nota.numero} — ${nota.emitente.nome}`,
+          refType: 'nota_entrada', refId: inv.id, userId: req.user.id });
+        vinculados++;
+      }
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      id: inv.id, numero: nota.numero, emitente: nota.emitente.nome,
+      itens: nota.itens.length, itens_vinculados: vinculados,
+      valor_total: nota.valor_total, valor_pis: nota.valor_pis, valor_cofins: nota.valor_cofins,
+      aviso: vinculados < nota.itens.length
+        ? `${nota.itens.length - vinculados} item(ns) não casaram com o cadastro (sem código de barras correspondente) e não movimentaram estoque.`
+        : null,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Associa manualmente um item da nota a um produto do cadastro, movimentando o estoque.
+app.patch('/api/acougue/purchases/items/:id', ...acougueOnly, async (req, res) => {
+  const { product_id } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [item] } = await client.query('SELECT * FROM acougue_purchase_items WHERE id = $1', [req.params.id]);
+    if (!item) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Item não encontrado' }); }
+    if (item.product_id) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Este item já está vinculado a um produto.' }); }
+
+    await client.query('UPDATE acougue_purchase_items SET product_id = $1 WHERE id = $2', [product_id, req.params.id]);
+    await client.query('UPDATE acougue_products SET stock_qty = stock_qty + $1 WHERE id = $2', [item.quantidade, product_id]);
+    await registrarMovimento(client, {
+      productId: product_id, tipo: 'entrada_nota', quantidade: item.quantidade,
+      motivo: `Vínculo manual — item "${item.descricao}" da nota`,
+      refType: 'nota_entrada', refId: item.invoice_id, userId: req.user.id });
+    await client.query('COMMIT');
+    res.json({ ok: true, quantidade_somada: item.quantidade });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+/* ---- Câmara fria (quebra de peso) ---- */
+app.get('/api/acougue/cold-storage', ...acougueOnly, async (req, res) => {
+  try {
+    const settings = await getAcougueSettingsMap();
+    const taxaDia = Number(settings.shrink_pct_day || 0.8);
+    const entradas = await db.all(
+      `SELECT id, supplier_name, animal_type, weight_kg, entry_date, chamber_in_at, chamber_out_at,
+              weight_out_kg, chamber_notes
+       FROM acougue_carcass_entries ORDER BY entry_date DESC, id DESC LIMIT 200`, []);
+
+    const agora = Date.now();
+    res.json({
+      shrink_pct_day: taxaDia,
+      entries: entradas.map(e => {
+        const entrada = e.chamber_in_at ? new Date(e.chamber_in_at) : (e.entry_date ? new Date(e.entry_date) : null);
+        const saida = e.chamber_out_at ? new Date(e.chamber_out_at) : null;
+        if (!entrada) return { ...e, dias: null, perda_esperada_kg: null };
+
+        const dias = Math.max(0, ((saida ? saida.getTime() : agora) - entrada.getTime()) / 86400000);
+        const perdaEsperada = round3(e.weight_kg * (taxaDia / 100) * dias);
+        // Perda real só existe depois de pesar na saída. A diferença entre real e esperada é
+        // o que interessa ao dono: muito acima do esperado é câmara mal regulada ou desvio;
+        // muito abaixo costuma ser erro de pesagem.
+        const perdaReal = e.weight_out_kg != null ? round3(e.weight_kg - e.weight_out_kg) : null;
+        return {
+          ...e,
+          dias: Math.round(dias * 10) / 10,
+          perda_esperada_kg: perdaEsperada,
+          perda_esperada_pct: e.weight_kg ? round3((perdaEsperada / e.weight_kg) * 100) : 0,
+          perda_real_kg: perdaReal,
+          perda_real_pct: (perdaReal != null && e.weight_kg) ? round3((perdaReal / e.weight_kg) * 100) : null,
+          divergencia_kg: perdaReal != null ? round3(perdaReal - perdaEsperada) : null,
+          peso_estimado_atual: saida ? e.weight_out_kg : round3(e.weight_kg - perdaEsperada),
+        };
+      }),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.patch('/api/acougue/cold-storage/:id', ...acougueOnly, async (req, res) => {
+  const { chamber_in_at, chamber_out_at, weight_out_kg, chamber_notes } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [atual] } = await client.query('SELECT * FROM acougue_carcass_entries WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (!atual) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Entrada de carcaça não encontrada' }); }
+
+    const pesoSaida = weight_out_kg === '' || weight_out_kg === undefined ? atual.weight_out_kg : Number(weight_out_kg);
+    if (pesoSaida != null && Number.isNaN(pesoSaida)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Peso de saída inválido.' });
+    }
+    if (pesoSaida != null && pesoSaida < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'O peso de saída não pode ser negativo.' });
+    }
+    if (pesoSaida != null && pesoSaida > atual.weight_kg) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `O peso de saída (${pesoSaida} kg) não pode ser maior que o de entrada (${atual.weight_kg} kg). Carne não ganha peso na câmara — confira a balança.` });
+    }
+
+    await client.query(
+      'UPDATE acougue_carcass_entries SET chamber_in_at=$1, chamber_out_at=$2, weight_out_kg=$3, chamber_notes=$4 WHERE id=$5',
+      [chamber_in_at ?? atual.chamber_in_at, chamber_out_at ?? atual.chamber_out_at,
+       pesoSaida, chamber_notes ?? atual.chamber_notes, req.params.id]);
+
+    // A quebra só vira movimentação quando a carcaça é pesada na saída — antes disso a perda é
+    // estimativa, e estimativa não pode baixar estoque. Só lança se o peso mudou, senão salvar
+    // a mesma tela duas vezes duplicaria a baixa.
+    const jaLancado = atual.weight_out_kg != null;
+    const mudouPeso = pesoSaida != null && pesoSaida !== atual.weight_out_kg;
+    if (mudouPeso) {
+      const quebra = round3(atual.weight_kg - pesoSaida);
+      if (jaLancado) {
+        // Correção de pesagem: estorna o lançamento anterior antes de lançar o novo, para o
+        // livro refletir o histórico real em vez de esconder a correção.
+        const quebraAnterior = round3(atual.weight_kg - atual.weight_out_kg);
+        await registrarMovimento(client, {
+          carcassEntryId: atual.id, tipo: 'estorno_quebra', quantidade: quebraAnterior,
+          motivo: `Estorno de pesagem anterior (${atual.weight_out_kg} kg)`,
+          refType: 'carcaca', refId: atual.id, userId: req.user.id });
+      }
+      await registrarMovimento(client, {
+        carcassEntryId: atual.id, tipo: 'quebra_camara', quantidade: -quebra,
+        motivo: `Quebra de peso na câmara: entrou ${atual.weight_kg} kg, saiu ${pesoSaida} kg`,
+        refType: 'carcaca', refId: atual.id, userId: req.user.id });
+    }
+
+    await client.query('COMMIT');
+    const { rows: [atualizado] } = await pool.query('SELECT * FROM acougue_carcass_entries WHERE id = $1', [req.params.id]);
+    res.json(atualizado);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Livro de movimentação — a visão de controle interno. Filtra por produto, carcaça ou tipo.
+app.get('/api/acougue/stock-movements', ...acougueOnly, async (req, res) => {
+  try {
+    const filtros = [];
+    const params = [];
+    if (req.query.product_id) { params.push(req.query.product_id); filtros.push(`m.product_id = $${params.length}`); }
+    if (req.query.carcass_entry_id) { params.push(req.query.carcass_entry_id); filtros.push(`m.carcass_entry_id = $${params.length}`); }
+    if (req.query.tipo) { params.push(req.query.tipo); filtros.push(`m.tipo = $${params.length}`); }
+    const where = filtros.length ? `WHERE ${filtros.join(' AND ')}` : '';
+
+    const { rows } = await pool.query(
+      `SELECT m.*, p.name AS product_name, p.unit, u.name AS usuario
+       FROM acougue_stock_movements m
+       LEFT JOIN acougue_products p ON p.id = m.product_id
+       LEFT JOIN users u ON u.id = m.created_by
+       ${where} ORDER BY m.created_at DESC, m.id DESC LIMIT 300`, params);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- SPED Fiscal (EFD ICMS/IPI) ---- */
+// Gera o arquivo do período. `download=1` devolve como arquivo .txt; sem isso devolve um
+// resumo em JSON, útil pra conferir os números antes de baixar.
+app.get('/api/acougue/sped/efd-icms-ipi', ...acougueOnly, async (req, res) => {
+  const mes = Number(req.query.month);
+  const ano = Number(req.query.year);
+  if (!mes || !ano || mes < 1 || mes > 12) {
+    return res.status(400).json({ error: 'Informe mês (1-12) e ano.' });
+  }
+  try {
+    const settings = await getAcougueSettingsMap();
+    if (!settings.cnpj || !settings.ie) {
+      return res.status(422).json({ error: 'Preencha CNPJ e Inscrição Estadual em Configurações antes de gerar o SPED.' });
+    }
+
+    // Date.UTC evita que o fuso do servidor jogue o primeiro/último dia para o mês vizinho.
+    const inicio = new Date(Date.UTC(ano, mes - 1, 1));
+    const fim = new Date(Date.UTC(ano, mes, 0));
+    const deISO = inicio.toISOString().slice(0, 10);
+    const ateISO = fim.toISOString().slice(0, 10);
+
+    const produtos = await db.all('SELECT id, name, barcode, unit, ncm, cest FROM acougue_products WHERE active = 1 ORDER BY id', []);
+
+    const notas = await db.all(
+      `SELECT * FROM acougue_purchase_invoices WHERE data_emissao BETWEEN ? AND ? ORDER BY data_emissao, id`,
+      [deISO, ateISO]);
+    for (const n of notas) {
+      n.itens = await db.all('SELECT * FROM acougue_purchase_items WHERE invoice_id = ? ORDER BY numero_item', [n.id]);
+      delete n.xml;
+    }
+
+    // Só entram vendas com NFC-e emitida: venda sem documento fiscal não vai para a EFD (e, se
+    // houver muitas, é sinal de que o açougue está vendendo sem emitir — problema anterior ao SPED).
+    const vendas = await db.all(
+      `SELECT s.id, s.total_value, s.status, s.created_at::date AS data,
+              i.numero, i.serie, i.chave_acesso
+       FROM acougue_sales s
+       JOIN acougue_invoices i ON i.ref_type = 'venda' AND i.ref_id = s.id AND i.status = 'autorizada'
+       WHERE s.created_at::date BETWEEN ? AND ? ORDER BY s.created_at`, [deISO, ateISO]);
+
+    const inventario = await db.all(
+      `SELECT id AS product_id, unit AS unidade, stock_qty AS quantidade,
+              COALESCE(cost_price, 0) AS valor_unitario,
+              ROUND((stock_qty * COALESCE(cost_price, 0))::numeric, 2)::float8 AS valor
+       FROM acougue_products WHERE active = 1 AND stock_qty > 0 ORDER BY id`, []);
+
+    const arquivo = sped.gerarEfdIcmsIpi({
+      settings, inicio, fim, produtos,
+      entradas: notas,
+      vendas: vendas.map(v => ({
+        data: v.data, numero: v.numero, serie: v.serie, chave_acesso: v.chave_acesso,
+        valor_total: v.total_value, cancelada: v.status === 'cancelada',
+        valor_icms: 0, valor_pis: 0, valor_cofins: 0,
+      })),
+      inventario,
+    });
+
+    if (req.query.download === '1') {
+      const nome = `SPED-EFD-${String(mes).padStart(2, '0')}${ano}-${settings.cnpj}.txt`;
+      res.setHeader('Content-Type', 'text/plain; charset=iso-8859-1');
+      res.setHeader('Content-Disposition', `attachment; filename="${nome}"`);
+      // A EFD exige ISO-8859-1: acento gravado em UTF-8 é recusado pelo validador.
+      return res.send(Buffer.from(arquivo, 'latin1'));
+    }
+
+    const linhas = arquivo.split('\r\n').filter(Boolean);
+    res.json({
+      periodo: `${String(mes).padStart(2, '0')}/${ano}`,
+      linhas: linhas.length,
+      notas_entrada: notas.length,
+      vendas_com_nfce: vendas.length,
+      produtos_no_cadastro: produtos.length,
+      itens_no_inventario: inventario.length,
+      preview: linhas.slice(0, 12),
+      aviso: 'Arquivo gerado a partir dos dados do sistema. Valide no PVA da Receita e revise com o contador antes de transmitir — perfil da EFD, tratamento de ICMS-ST e obrigatoriedade de blocos são decisões fiscais que o sistema não tem como tomar.',
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 /* ---- Configurações fiscais ---- */
 app.get('/api/acougue/settings', ...acougueOnly, async (req, res) => {
   try {
@@ -2796,7 +3334,7 @@ app.get('/api/acougue/settings', ...acougueOnly, async (req, res) => {
 
 app.patch('/api/acougue/settings', ...acougueOnly, async (req, res) => {
   const allowedKeys = ['business_name', 'cnpj', 'ie', 'logradouro', 'numero', 'bairro', 'municipio', 'uf', 'cep', 'regime_tributario', 'pis_rate', 'cofins_rate', 'dressing_pct', 'blood_pct', 'hide_pct', 'head_feet_pct',
-    'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type'];
+    'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type', 'hotkeys', 'shrink_pct_day'];
   try {
     for (const key of allowedKeys) {
       if (req.body[key] !== undefined) {

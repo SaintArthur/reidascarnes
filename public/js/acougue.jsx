@@ -18,6 +18,8 @@
       return [
         { id: 'inicio', icon: 'fas fa-chart-pie', label: 'Início' },
         { id: 'entrada', icon: 'fas fa-truck-loading', label: 'Entrada de Carcaça' },
+        { id: 'notas-entrada', icon: 'fas fa-file-import', label: 'Entrada de Notas' },
+        { id: 'camara', icon: 'fas fa-snowflake', label: 'Câmara Fria' },
         { id: 'rendimento', icon: 'fas fa-calculator', label: 'Rendimento de Carcaça' },
         { id: 'saida', icon: 'fas fa-drumstick-bite', label: 'Saída de Cortes' },
         { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos' },
@@ -786,6 +788,32 @@
       );
     }
 
+    /* ---- ATALHOS DE TECLADO DO CAIXA ---- */
+    // Rótulos e ordem de exibição na barra de funções. A ordem aqui é a ordem na tela.
+    const ACG_ACOES_CAIXA = [
+      { id: 'foco_codigo',    label: 'Buscar produto' },
+      { id: 'cpf_nota',       label: 'CPF na nota' },
+      { id: 'finalizar',      label: 'Finalizar venda' },
+      { id: 'reimprimir',     label: 'Reimprimir último' },
+      { id: 'suspender',      label: 'Suspender/Retomar' },
+      { id: 'remover_item',   label: 'Remover último item' },
+      { id: 'cancelar_venda', label: 'Cancelar venda' },
+    ];
+
+    const ACG_HOTKEYS_PADRAO = {
+      foco_codigo: 'F2', cpf_nota: 'F4', finalizar: 'F5', reimprimir: 'F6',
+      cancelar_venda: 'F9', remover_item: 'F10', suspender: 'F12',
+    };
+
+    // As settings guardam o mapa como texto JSON; se vier corrompido, cai no padrão em vez
+    // de deixar o caixa sem atalho nenhum.
+    function acgLerHotkeys(settings) {
+      try {
+        const salvo = typeof settings?.hotkeys === 'string' ? JSON.parse(settings.hotkeys) : settings?.hotkeys;
+        return { ...ACG_HOTKEYS_PADRAO, ...(salvo || {}) };
+      } catch { return { ...ACG_HOTKEYS_PADRAO }; }
+    }
+
     /* ---- IMPRESSÃO DO CUPOM (80mm) ---- */
     // Imprime pelo diálogo do navegador, na impressora instalada na máquina do balcão. É o
     // caminho possível enquanto o sistema roda na nuvem: uma página web não alcança impressora
@@ -890,7 +918,23 @@
       const [manualProducts, setManualProducts] = useState([]);
       // Razão social, CNPJ, IE e endereço vão no cabeçalho do cupom impresso.
       const [fiscalSettings, setFiscalSettings] = useState(null);
+      const [hotkeys, setHotkeys] = useState(ACG_HOTKEYS_PADRAO);
+      // CPF informado para a próxima nota; some depois de finalizar, porque é do cliente
+      // atual e ir junto na venda do próximo seria erro fiscal.
+      const [cpfNota, setCpfNota] = useState('');
+      const [filtroProduto, setFiltroProduto] = useState('');
+      // Último item lançado, exibido em destaque no painel lateral.
+      const [ultimoItem, setUltimoItem] = useState(null);
       const inputRef = useRef(null);
+
+      // Busca por nome ou PLU — o operador que sabe o código digita o número, quem não sabe
+      // digita o começo do nome.
+      const produtosFiltrados = React.useMemo(() => {
+        const termo = filtroProduto.trim().toLowerCase();
+        if (!termo) return manualProducts;
+        return manualProducts.filter(p =>
+          p.name.toLowerCase().includes(termo) || String(p.scale_code || '').startsWith(termo));
+      }, [manualProducts, filtroProduto]);
 
       const loadToday = async () => {
         setLoadingSales(true);
@@ -901,7 +945,9 @@
       useEffect(() => {
         loadToday();
         apiCall('GET', '/acougue/products').then(res => { if (res.ok) setManualProducts(res.data); });
-        apiCall('GET', '/acougue/settings').then(res => { if (res.ok) setFiscalSettings(res.data); });
+        apiCall('GET', '/acougue/settings').then(res => {
+          if (res.ok) { setFiscalSettings(res.data); setHotkeys(acgLerHotkeys(res.data)); }
+        });
         inputRef.current?.focus();
       }, []);
 
@@ -909,6 +955,12 @@
       // para produto de unidade. Somar em vez de substituir é proposital: dois pacotes de
       // picanha bipados viram uma linha só com o peso total, como faz qualquer PDV de açougue.
       const addProductToCart = (product, quantity = 1) => {
+        setUltimoItem({ product, quantity });
+        // Aviso de estoque, não bloqueio: o saldo do sistema atrasa em relação à bancada, e
+        // travar a venda por causa disso pararia a fila por um problema de cadastro.
+        if (product.stock_qty != null && quantity > product.stock_qty) {
+          showToast(`Atenção: ${product.name} tem só ${Number(product.stock_qty).toFixed(3)} ${product.unit} em estoque`, 'info');
+        }
         setCart(prev => {
           const existing = prev.find(c => c.product.id === product.id);
           if (existing) return prev.map(c => c.product.id === product.id ? { ...c, quantity: Number((c.quantity + quantity).toFixed(3)) } : c);
@@ -979,7 +1031,7 @@
         }
 
         const sale = res.data;
-        const nfce = await apiCall('POST', `/acougue/sales/${sale.id}/nfce`);
+        const nfce = await apiCall('POST', `/acougue/sales/${sale.id}/nfce`, cpfNota ? { cpf: cpfNota } : {});
         setFinalizing(false);
 
         const autorizada = nfce.ok && nfce.data?.status === 'autorizada';
@@ -991,11 +1043,87 @@
           showToast(`Venda ${sale.sale_number} registrada, mas a nota falhou: ${nfce.data?.error || 'erro desconhecido'}`, 'error');
         }
 
-        printCupom({ sale, items: snapshot, paymentMethod, invoice: autorizada ? nfce.data : null, settings: fiscalSettings });
+        const cupom = { sale, items: snapshot, paymentMethod, invoice: autorizada ? nfce.data : null, settings: fiscalSettings };
+        ultimaVenda.current = cupom;
+        printCupom(cupom);
         setCart([]);
+        setCpfNota('');
+        setUltimoItem(null);
         loadToday();
         inputRef.current?.focus();
       };
+
+      // Guarda a última venda para o F6 poder reimprimir sem consultar o servidor de novo —
+      // reimpressão é pedida quando o papel picotou ou o cliente quer segunda via, e nesses
+      // dois casos o operador está com a fila esperando.
+      const ultimaVenda = useRef(null);
+      const vendaSuspensa = useRef(null);
+
+      const acoes = {
+        foco_codigo: () => inputRef.current?.focus(),
+
+        cpf_nota: () => {
+          const cpf = prompt('CPF do cliente para a nota (deixe vazio para consumidor não identificado):', cpfNota || '');
+          if (cpf !== null) {
+            const limpo = cpf.replace(/\D/g, '');
+            setCpfNota(limpo);
+            showToast(limpo ? `CPF ${limpo} vai na próxima nota` : 'Nota sairá sem CPF', 'info');
+          }
+          inputRef.current?.focus();
+        },
+
+        finalizar: () => { if (cart.length && !finalizing) finalize(); },
+
+        reimprimir: () => {
+          if (!ultimaVenda.current) { showToast('Nenhuma venda para reimprimir', 'info'); return; }
+          printCupom(ultimaVenda.current);
+        },
+
+        // Suspender guarda o carrinho para atender outro cliente (o da frente esqueceu algo,
+        // foi buscar mais um corte). Apertar de novo devolve o carrinho guardado.
+        suspender: () => {
+          if (vendaSuspensa.current) {
+            const retomado = vendaSuspensa.current;
+            vendaSuspensa.current = cart.length ? cart : null;
+            setCart(retomado);
+            showToast('Venda retomada', 'success');
+          } else if (cart.length) {
+            vendaSuspensa.current = cart;
+            setCart([]);
+            showToast('Venda suspensa — aperte de novo para retomar', 'info');
+          } else {
+            showToast('Carrinho vazio', 'info');
+          }
+          inputRef.current?.focus();
+        },
+
+        remover_item: () => {
+          setCart(prev => prev.slice(0, -1));
+          inputRef.current?.focus();
+        },
+
+        cancelar_venda: () => {
+          if (!cart.length) return;
+          if (confirm('Cancelar esta venda? O carrinho será esvaziado.')) {
+            setCart([]);
+            showToast('Venda cancelada', 'info');
+          }
+          inputRef.current?.focus();
+        },
+      };
+
+      // Atalhos valem em toda a tela do caixa. O preventDefault é essencial: sem ele o F5 do
+      // navegador recarrega a página no meio da venda e o carrinho some.
+      useEffect(() => {
+        const onKey = (e) => {
+          const acaoId = Object.keys(hotkeys).find(k => hotkeys[k] === e.key);
+          if (!acaoId || !acoes[acaoId]) return;
+          e.preventDefault();
+          acoes[acaoId]();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      });
 
       const cancelSale = async (id) => {
         if (!confirm('Cancelar esta venda? O estoque será devolvido.')) return;
@@ -1050,14 +1178,27 @@
 
               {manualProducts.length > 0 && (
                 <div style={{ marginTop: 16 }}>
-                  <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, margin: '0 0 10px' }}>Ou toque no produto (sem precisar escanear)</p>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10 }}>
-                    {manualProducts.map(p => (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+                    <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, margin: 0 }}>Ou toque no produto (sem precisar escanear)</p>
+                    <input
+                      value={filtroProduto}
+                      onChange={e => setFiltroProduto(e.target.value)}
+                      placeholder="filtrar por nome ou PLU..."
+                      style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12, minWidth: 190 }}
+                    />
+                  </div>
+                  {/* Altura limitada com rolagem própria: o catálogo tem quase 200 itens e, solto,
+                      empurrava a barra de atalhos e o resto da tela para fora da vista. */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10, maxHeight: 260, overflowY: 'auto', paddingRight: 4 }}>
+                    {produtosFiltrados.map(p => (
                       <button key={p.id} onClick={() => addProductToCart(p)} style={{ padding: '14px 10px', borderRadius: 10, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 13, fontWeight: 600, cursor: 'pointer', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }}>
                         <span>{p.name}</span>
                         <span style={{ color: ACG_ACCENT, fontWeight: 700 }}>{fmtCur(p.price)}</span>
                       </button>
                     ))}
+                    {produtosFiltrados.length === 0 && (
+                      <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, gridColumn: '1 / -1', margin: 0 }}>Nenhum produto para "{filtroProduto}"</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -1071,17 +1212,81 @@
                 <option value="cartao_credito">Cartão de crédito</option>
                 <option value="pix">PIX</option>
               </AcgSelect>
-              <div style={{ flex: 1 }}></div>
+              {/* Espelha o painel do PDV antigo: o item recém-bipado em letra grande, para o
+                  operador conferir de relance se pegou o corte e o peso certos sem precisar ler
+                  a tabela do carrinho. É o que evita o cliente reclamar depois do cupom. */}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: 120 }}>
+                {ultimoItem ? (
+                  <div style={{ background: 'var(--bp-card)', border: `1px solid ${ACG_ACCENT}44`, borderRadius: 12, padding: '14px 16px' }}>
+                    <div style={{ color: 'var(--bp-text-faint)', fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>ÚLTIMO ITEM</div>
+                    <div className="syne" style={{ color: 'var(--bp-text)', fontSize: 20, fontWeight: 800, lineHeight: 1.15, marginBottom: 6 }}>
+                      {ultimoItem.product.name}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, color: 'var(--bp-text-secondary)', fontSize: 13 }}>
+                      <strong style={{ color: ACG_ACCENT, fontSize: 18, fontFamily: 'DM Mono, monospace' }}>
+                        {Number(ultimoItem.quantity).toFixed(3).replace('.', ',')}
+                      </strong>
+                      <span>{ultimoItem.product.unit}</span>
+                      <span>×</span>
+                      <span>{fmtCur(ultimoItem.product.price)}</span>
+                    </div>
+                    <div style={{ color: 'var(--bp-text)', fontSize: 24, fontWeight: 800, marginTop: 6, fontFamily: 'DM Mono, monospace' }}>
+                      {fmtCur(ultimoItem.quantity * ultimoItem.product.price)}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ textAlign: 'center', color: 'var(--bp-text-faint)', fontSize: 12 }}>
+                    <i className="fas fa-barcode" style={{ fontSize: 22, display: 'block', marginBottom: 8, opacity: 0.5 }}></i>
+                    Bipe um produto para começar
+                  </div>
+                )}
+              </div>
+
               <div style={{ borderTop: '1px solid var(--bp-border)', paddingTop: 16, marginTop: 16 }}>
-                <p style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--bp-text)', fontSize: 22, fontWeight: 800, margin: '0 0 16px' }}>
-                  <span style={{ fontSize: 14, color: 'var(--bp-text-faint)', fontWeight: 600, alignSelf: 'center' }}>Total</span>
-                  {fmtCur(total)}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, color: 'var(--bp-text-faint)' }}>{cart.length} item(ns)</span>
+                  <span style={{ fontSize: 12, color: 'var(--bp-text-faint)' }}>
+                    {cart.reduce((s, c) => s + (c.product.unit === 'kg' ? c.quantity : 0), 0).toFixed(3).replace('.', ',')} kg
+                  </span>
+                </div>
+                <p style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', color: 'var(--bp-text)', margin: '0 0 16px' }}>
+                  <span style={{ fontSize: 13, color: 'var(--bp-text-faint)', fontWeight: 600 }}>TOTAL</span>
+                  <span className="syne" style={{ fontSize: 34, fontWeight: 800, letterSpacing: -1 }}>{fmtCur(total)}</span>
                 </p>
                 <AcgButton onClick={finalize} disabled={cart.length === 0 || finalizing} style={{ width: '100%', padding: '14px 0', fontSize: 15 }}>
                   {finalizing ? 'Processando...' : <><i className="fas fa-check" style={{ marginRight: 8 }}></i>Finalizar venda</>}
                 </AcgButton>
               </div>
             </div>
+          </div>
+
+          {/* Barra de funções: mostra o atalho e também funciona como botão, porque nem todo
+              operador decora tecla no primeiro dia — e num balcão movimentado ninguém para
+              pra procurar. Os rótulos vêm do mapa configurável, então mudar a tecla em
+              Configurações muda o que aparece aqui. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 24 }}>
+            {ACG_ACOES_CAIXA.map(acao => (
+              <button
+                key={acao.id}
+                onClick={() => acoes[acao.id]?.()}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8,
+                  border: '1px solid var(--bp-border2)', background: 'var(--bp-card)',
+                  color: 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 12,
+                }}
+              >
+                <kbd style={{
+                  background: `${ACG_ACCENT}22`, color: ACG_ACCENT, border: `1px solid ${ACG_ACCENT}55`,
+                  borderRadius: 4, padding: '1px 6px', fontFamily: 'DM Mono, monospace', fontSize: 11, fontWeight: 700,
+                }}>{hotkeys[acao.id] || '—'}</kbd>
+                {acao.label}
+              </button>
+            ))}
+            {cpfNota && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderRadius: 8, background: '#16a34a22', border: '1px solid #16a34a55', color: '#16a34a', fontSize: 12 }}>
+                <i className="fas fa-id-card"></i>CPF {cpfNota} na nota
+              </span>
+            )}
           </div>
 
           <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
@@ -1278,6 +1483,276 @@
       window.print();
     }
 
+    /* ---- ENTRADA DE NOTAS (XML do fornecedor) ---- */
+    function AcougueNotasEntrada({ showToast }) {
+      const [notas, setNotas] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [enviando, setEnviando] = useState(false);
+      const [detalhe, setDetalhe] = useState(null);
+      const [produtos, setProdutos] = useState([]);
+      const fileRef = useRef(null);
+
+      const load = async () => {
+        setLoading(true);
+        const res = await apiCall('GET', '/acougue/purchases');
+        if (res.ok) setNotas(res.data); else showToast(res.data?.error || 'Erro ao carregar notas', 'error');
+        setLoading(false);
+      };
+      useEffect(() => {
+        load();
+        apiCall('GET', '/acougue/products').then(r => { if (r.ok) setProdutos(r.data); });
+      }, []);
+
+      // Aceita vários arquivos de uma vez: o fornecedor costuma mandar o lote do mês junto.
+      const enviarArquivos = async (files) => {
+        if (!files?.length) return;
+        setEnviando(true);
+        let ok = 0, dup = 0, erro = 0;
+        for (const file of files) {
+          const xml = await file.text();
+          const res = await apiCall('POST', '/acougue/purchases/xml', { xml });
+          if (res.ok) { ok++; if (res.data.aviso) showToast(`${file.name}: ${res.data.aviso}`, 'info'); }
+          else if (res.status === 409) dup++;
+          else { erro++; showToast(`${file.name}: ${res.data?.error || 'erro'}`, 'error'); }
+        }
+        setEnviando(false);
+        if (fileRef.current) fileRef.current.value = '';
+        showToast(`${ok} nota(s) importada(s)${dup ? `, ${dup} já existia(m)` : ''}${erro ? `, ${erro} com erro` : ''}`, ok ? 'success' : 'info');
+        load();
+      };
+
+      const abrirDetalhe = async (id) => {
+        const res = await apiCall('GET', `/acougue/purchases/${id}`);
+        if (res.ok) setDetalhe(res.data); else showToast(res.data?.error || 'Erro', 'error');
+      };
+
+      const vincular = async (itemId, productId) => {
+        if (!productId) return;
+        const res = await apiCall('PATCH', `/acougue/purchases/items/${itemId}`, { product_id: Number(productId) });
+        if (res.ok) { showToast(`Vinculado — ${res.data.quantidade_somada} somado ao estoque`, 'success'); abrirDetalhe(detalhe.id); }
+        else showToast(res.data?.error || 'Erro ao vincular', 'error');
+      };
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-file-import" title="Entrada de Notas" subtitle="Importe o XML da nota do fornecedor — o estoque e os créditos de PIS/COFINS entram sozinhos" />
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, marginBottom: 20 }}>
+            <input ref={fileRef} type="file" accept=".xml,text/xml" multiple style={{ display: 'none' }}
+              onChange={e => enviarArquivos(Array.from(e.target.files || []))} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <AcgButton onClick={() => fileRef.current?.click()} disabled={enviando}>
+                <i className="fas fa-upload" style={{ marginRight: 8 }}></i>{enviando ? 'Importando...' : 'Selecionar XML(s)'}
+              </AcgButton>
+              <span style={{ color: 'var(--bp-text-faint)', fontSize: 12 }}>
+                Pode selecionar vários. Nota já importada é recusada pela chave de acesso, então não duplica estoque.
+              </span>
+            </div>
+          </div>
+
+          {loading ? <AcgSpinner /> : (
+            <AcgTable
+              columns={[
+                { key: 'numero', label: 'Nota', render: r => `${r.numero}/${r.serie}` },
+                { key: 'emit_nome', label: 'Fornecedor' },
+                { key: 'data_emissao', label: 'Emissão', render: r => fmtDate(r.data_emissao) },
+                { key: 'itens', label: 'Itens', align: 'right' },
+                { key: 'valor_total', label: 'Total', align: 'right', render: r => fmtCur(r.valor_total) },
+                { key: 'creditos', label: 'PIS+COFINS', align: 'right', render: r => fmtCur((r.valor_pis || 0) + (r.valor_cofins || 0)) },
+                { key: 'acoes', label: '', align: 'right', render: r => (
+                  <button onClick={() => abrirDetalhe(r.id)} style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12 }}>ver itens</button>
+                ) },
+              ]}
+              rows={notas}
+              emptyLabel="Nenhuma nota importada ainda"
+            />
+          )}
+
+          {detalhe && (
+            <div style={{ marginTop: 20, background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: 0 }}>
+                  Nota {detalhe.numero}/{detalhe.serie} — {detalhe.emit_nome}
+                </p>
+                <button onClick={() => setDetalhe(null)} style={{ background: 'none', border: 'none', color: 'var(--bp-text-faint)', cursor: 'pointer' }}>fechar</button>
+              </div>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', wordBreak: 'break-all' }}>Chave: {detalhe.chave_acesso || '—'}</p>
+              <AcgTable
+                columns={[
+                  { key: 'descricao', label: 'Item' },
+                  { key: 'ncm', label: 'NCM' },
+                  { key: 'cfop', label: 'CFOP' },
+                  { key: 'quantidade', label: 'Qtd', align: 'right', render: r => `${r.quantidade} ${r.unidade}` },
+                  { key: 'valor_total', label: 'Total', align: 'right', render: r => fmtCur(r.valor_total) },
+                  // Item sem vínculo não movimentou estoque — aqui é onde o operador resolve.
+                  { key: 'produto', label: 'Produto no estoque', render: r => r.product_id
+                    ? <span style={{ color: '#16a34a' }}><i className="fas fa-check" style={{ marginRight: 5 }}></i>vinculado</span>
+                    : (
+                      <select defaultValue="" onChange={e => vincular(r.id, e.target.value)}
+                        style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 11, maxWidth: 170 }}>
+                        <option value="">vincular a...</option>
+                        {produtos.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    ) },
+                ]}
+                rows={detalhe.itens}
+                emptyLabel="Sem itens"
+              />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ---- CÂMARA FRIA (quebra de peso) ---- */
+    function AcougueCamara({ showToast }) {
+      const [dados, setDados] = useState(null);
+      const [editando, setEditando] = useState(null);
+      const [form, setForm] = useState({});
+
+      const load = async () => {
+        const res = await apiCall('GET', '/acougue/cold-storage');
+        if (res.ok) setDados(res.data); else showToast(res.data?.error || 'Erro ao carregar', 'error');
+      };
+      useEffect(() => { load(); }, []);
+
+      const salvar = async (id) => {
+        const res = await apiCall('PATCH', `/acougue/cold-storage/${id}`, form);
+        if (res.ok) { showToast('Câmara atualizada', 'success'); setEditando(null); setForm({}); load(); }
+        else showToast(res.data?.error || 'Erro ao salvar', 'error');
+      };
+
+      if (!dados) return <AcgSpinner />;
+
+      const naCamara = dados.entries.filter(e => e.chamber_in_at && !e.chamber_out_at);
+      const perdaTotal = dados.entries.reduce((s, e) => s + (e.perda_real_kg || 0), 0);
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-snowflake" title="Câmara Fria" subtitle="Carne perde água parada na câmara — aqui o esperado é comparado com o pesado de verdade" />
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 20 }}>
+            <AcgCard label="Carcaças na câmara" value={String(naCamara.length)} icon="fa-snowflake" color="#38bdf8" bg="rgba(56,189,248,0.12)" />
+            <AcgCard label="Peso estimado agora" value={`${naCamara.reduce((s, e) => s + (e.peso_estimado_atual || 0), 0).toFixed(1)} kg`} icon="fa-scale-balanced" color="#a78bfa" bg="rgba(167,139,250,0.12)" />
+            <AcgCard label="Perda real acumulada" value={`${perdaTotal.toFixed(1)} kg`} icon="fa-arrow-trend-down" color="#f87171" bg="rgba(248,113,113,0.12)" />
+            <AcgCard label="Taxa configurada" value={`${dados.shrink_pct_day}% / dia`} icon="fa-percent" color="#fbbf24" bg="rgba(251,191,36,0.12)" />
+          </div>
+
+          <AcgTable
+            columns={[
+              { key: 'supplier_name', label: 'Fornecedor' },
+              { key: 'weight_kg', label: 'Entrada', align: 'right', render: r => `${r.weight_kg} kg` },
+              { key: 'dias', label: 'Dias', align: 'right', render: r => r.dias ?? '—' },
+              { key: 'esperada', label: 'Perda esperada', align: 'right', render: r => r.perda_esperada_kg != null ? `${r.perda_esperada_kg} kg (${r.perda_esperada_pct}%)` : '—' },
+              { key: 'real', label: 'Perda real', align: 'right', render: r => r.perda_real_kg != null ? `${r.perda_real_kg} kg (${r.perda_real_pct}%)` : '—' },
+              // A divergência é o número que interessa: acima do esperado pode ser câmara mal
+              // regulada ou desvio; muito abaixo costuma ser erro de pesagem.
+              { key: 'div', label: 'Divergência', align: 'right', render: r => r.divergencia_kg == null ? '—' : (
+                <span style={{ color: Math.abs(r.divergencia_kg) < 1 ? 'var(--bp-text-secondary)' : (r.divergencia_kg > 0 ? '#f87171' : '#38bdf8') }}>
+                  {r.divergencia_kg > 0 ? '+' : ''}{r.divergencia_kg} kg
+                </span>
+              ) },
+              { key: 'acoes', label: '', align: 'right', render: r => (
+                <button onClick={() => { setEditando(r.id); setForm({ chamber_in_at: r.chamber_in_at?.slice(0, 16) || '', chamber_out_at: r.chamber_out_at?.slice(0, 16) || '', weight_out_kg: r.weight_out_kg ?? '' }); }}
+                  style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12 }}>registrar</button>
+              ) },
+            ]}
+            rows={dados.entries}
+            emptyLabel="Nenhuma carcaça registrada"
+          />
+
+          {editando && (
+            <div style={{ marginTop: 20, background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 14px' }}>Movimentação na câmara</p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                <AcgInput label="Entrada na câmara" type="datetime-local" value={form.chamber_in_at || ''} onChange={e => setForm({ ...form, chamber_in_at: e.target.value })} />
+                <AcgInput label="Saída da câmara" type="datetime-local" value={form.chamber_out_at || ''} onChange={e => setForm({ ...form, chamber_out_at: e.target.value })} />
+                <AcgInput label="Peso na saída (kg)" type="number" step="0.001" min="0" value={form.weight_out_kg} onChange={e => setForm({ ...form, weight_out_kg: e.target.value })}
+                  hint="Pese ao tirar da câmara. É isso que revela a perda real." />
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <AcgButton onClick={() => salvar(editando)}>Salvar</AcgButton>
+                <AcgButton variant="ghost" onClick={() => { setEditando(null); setForm({}); }}>Cancelar</AcgButton>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ---- SPED FISCAL (EFD ICMS/IPI) ---- */
+    function AcougueSped({ month, year, showToast }) {
+      const [resumo, setResumo] = useState(null);
+      const [gerando, setGerando] = useState(false);
+
+      const gerar = async () => {
+        setGerando(true);
+        const res = await apiCall('GET', `/acougue/sped/efd-icms-ipi?month=${month}&year=${year}`);
+        setGerando(false);
+        if (res.ok) setResumo(res.data);
+        else { setResumo(null); showToast(res.data?.error || 'Erro ao gerar SPED', 'error'); }
+      };
+
+      // O download passa pelo fetch autenticado (a rota exige token), então o arquivo vem como
+      // blob e é salvo por um link temporário — não dá pra apontar um <a href> direto pra API.
+      const baixar = async () => {
+        const token = localStorage.getItem('token');
+        const resp = await fetch(`/api/acougue/sped/efd-icms-ipi?month=${month}&year=${year}&download=1`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!resp.ok) { showToast('Erro ao baixar o arquivo', 'error'); return; }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `SPED-EFD-${String(month).padStart(2, '0')}${year}.txt`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      return (
+        <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div>
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 3px' }}>SPED Fiscal — EFD ICMS/IPI</p>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: 0 }}>
+                Monta o arquivo do período com as notas de entrada, as NFC-e emitidas e o inventário.
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <AcgButton variant="ghost" onClick={gerar} disabled={gerando}>{gerando ? 'Gerando...' : 'Conferir'}</AcgButton>
+              {resumo && <AcgButton onClick={baixar}><i className="fas fa-download" style={{ marginRight: 6 }}></i>Baixar .txt</AcgButton>}
+            </div>
+          </div>
+
+          {resumo && (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10, marginBottom: 12 }}>
+                {[['Linhas', resumo.linhas], ['Notas de entrada', resumo.notas_entrada], ['Vendas com NFC-e', resumo.vendas_com_nfce], ['Itens no inventário', resumo.itens_no_inventario]].map(([l, v]) => (
+                  <div key={l} style={{ background: 'var(--bp-card)', border: '1px solid var(--bp-border2)', borderRadius: 10, padding: '10px 12px' }}>
+                    <div style={{ color: 'var(--bp-text-faint)', fontSize: 11 }}>{l}</div>
+                    <div style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 18 }}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              <pre style={{ background: 'var(--bp-card)', border: '1px solid var(--bp-border2)', borderRadius: 8, padding: 12, overflowX: 'auto', fontSize: 10, color: 'var(--bp-text-secondary)', margin: '0 0 12px', maxHeight: 180 }}>
+                {resumo.preview.join('\n')}
+              </pre>
+              {resumo.vendas_com_nfce === 0 && (
+                <p style={{ color: '#f59e0b', fontSize: 12, margin: '0 0 10px' }}>
+                  <i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>
+                  Nenhuma venda com NFC-e autorizada neste período — o bloco C sai só com as entradas.
+                </p>
+              )}
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: 0, lineHeight: 1.6 }}>
+                <i className="fas fa-circle-info" style={{ marginRight: 6 }}></i>{resumo.aviso}
+              </p>
+            </>
+          )}
+        </div>
+      );
+    }
+
     function AcougueImpostos({ showToast }) {
       const now = new Date();
       const [month, setMonth] = useState(now.getMonth() + 1);
@@ -1318,6 +1793,8 @@
             {apuracao && <AcgButton variant="ghost" onClick={() => printApuracaoReport(apuracao, settings || {})}><i className="fas fa-print" style={{ marginRight: 6 }}></i>Imprimir relatório</AcgButton>}
           </div>
 
+          <AcougueSped month={month} year={year} showToast={showToast} />
+
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20 }}>
             <select value={month} onChange={e => setMonth(Number(e.target.value))} style={{ padding: '7px 10px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 13 }}>
               {acgMonthNames.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
@@ -1354,8 +1831,27 @@
                 </div>
                 <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
                   <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 15, margin: '0 0 14px' }}>Base de cálculo</p>
+                  {/* A separação entre receita tributada e não tributada é o número que mais
+                      importa num açougue: a maior parte da carne bovina tem alíquota zero de
+                      PIS/COFINS, então tratar tudo como tributado inflaria o imposto. */}
+                  <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, margin: '6px 0', color: 'var(--bp-text-secondary)' }}><span>Saídas totais</span><strong style={{ color: 'var(--bp-text)' }}>{fmtCur(apuracao.saidas_total)}</strong></p>
+                  <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, margin: '4px 0 4px 12px', color: 'var(--bp-text-faint)' }}><span>↳ tributada (gera débito)</span><strong style={{ color: '#ef4444' }}>{fmtCur(apuracao.base_pis_tributada)}</strong></p>
+                  <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, margin: '4px 0 10px 12px', color: 'var(--bp-text-faint)' }}><span>↳ alíquota zero / monofásico</span><strong style={{ color: '#10b981' }}>{fmtCur(apuracao.base_pis_nao_tributada)}</strong></p>
                   <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, margin: '6px 0', color: 'var(--bp-text-secondary)' }}><span>Entradas (créditos)</span><strong style={{ color: 'var(--bp-text)' }}>{fmtCur(apuracao.entradas_total)}</strong></p>
-                  <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, margin: '6px 0', color: 'var(--bp-text-secondary)' }}><span>Saídas (débitos)</span><strong style={{ color: 'var(--bp-text)' }}>{fmtCur(apuracao.saidas_total)}</strong></p>
+                  <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, margin: '4px 0 4px 12px', color: 'var(--bp-text-faint)' }}><span>↳ com nota (documentado)</span><strong>{fmtCur(apuracao.entradas_com_nota)}</strong></p>
+                  <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, margin: '4px 0 0 12px', color: 'var(--bp-text-faint)' }}><span>↳ lançamento manual (estimado)</span><strong>{fmtCur(apuracao.entradas_manuais)}</strong></p>
+                  {apuracao.itens_sem_cst > 0 && (
+                    <p style={{ color: '#f59e0b', fontSize: 11, margin: '10px 0 0', lineHeight: 1.5 }}>
+                      <i className="fas fa-triangle-exclamation" style={{ marginRight: 5 }}></i>
+                      {apuracao.itens_sem_cst} item(ns) vendido(s) sem CST cadastrado foram tratados como <strong>tributados</strong>. Preencha em Produtos para a apuração ficar exata.
+                    </p>
+                  )}
+                  {(apuracao.pis_saldo_credor > 0 || apuracao.cofins_saldo_credor > 0) && (
+                    <p style={{ color: '#10b981', fontSize: 11, margin: '10px 0 0', lineHeight: 1.5 }}>
+                      <i className="fas fa-circle-info" style={{ marginRight: 5 }}></i>
+                      Saldo credor a transportar: PIS {fmtCur(apuracao.pis_saldo_credor)} · COFINS {fmtCur(apuracao.cofins_saldo_credor)}
+                    </p>
+                  )}
                   <p style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, margin: '14px 0 0', paddingTop: 10, borderTop: '1px solid var(--bp-border)', color: 'var(--bp-text)', fontWeight: 700 }}><span>Total a recolher</span><span style={{ color: ACG_ACCENT }}>{fmtCur(apuracao.pis_due + apuracao.cofins_due)}</span></p>
                 </div>
               </div>
@@ -1461,6 +1957,33 @@
               <p style={{ color: '#f59e0b', fontSize: 12, margin: '0 0 12px' }}><i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>No regime cumulativo (Lucro Presumido) não há aproveitamento de créditos — as alíquotas padrão são 0,65% (PIS) e 3% (COFINS). O cálculo de apuração deste sistema assume créditos sobre entradas; ajuste com seu contador antes de usar os valores para recolhimento.</p>
             )}
 
+            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 4px' }}>Atalhos do caixa</p>
+            <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', lineHeight: 1.5 }}>
+              Clique num campo e aperte a tecla que quer usar. Evite F1 (ajuda do navegador) e F11 (tela cheia),
+              que o navegador não deixa o sistema interceptar.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12 }}>
+              {ACG_ACOES_CAIXA.map(acao => {
+                const mapa = acgLerHotkeys(form);
+                return (
+                  <AcgInput
+                    key={acao.id}
+                    label={acao.label}
+                    value={mapa[acao.id] || ''}
+                    readOnly
+                    placeholder="clique e aperte a tecla"
+                    onKeyDown={e => {
+                      e.preventDefault();
+                      // Backspace/Delete limpam o atalho; qualquer outra tecla vira o novo.
+                      const tecla = (e.key === 'Backspace' || e.key === 'Delete') ? '' : e.key;
+                      setForm({ ...form, hotkeys: JSON.stringify({ ...mapa, [acao.id]: tecla }) });
+                    }}
+                    style={{ fontFamily: 'DM Mono, monospace', cursor: 'pointer' }}
+                  />
+                );
+              })}
+            </div>
+
             <AcgButton type="submit" disabled={saving}>{saving ? 'Salvando...' : 'Salvar configurações'}</AcgButton>
           </form>
         </div>
@@ -1543,6 +2066,8 @@
             <main style={{ flex: 1, overflow: 'auto', padding: '20px 16px' }}>
               {activeView === 'inicio' ? <AcougueInicio showToast={showToast} onNavigate={setActiveView} />
                 : activeView === 'entrada' ? <AcougueEntrada showToast={showToast} />
+                : activeView === 'notas-entrada' ? <AcougueNotasEntrada showToast={showToast} />
+                : activeView === 'camara' ? <AcougueCamara showToast={showToast} />
                 : activeView === 'rendimento' ? <AcougueRendimento showToast={showToast} />
                 : activeView === 'saida' ? <AcougueSaida showToast={showToast} />
                 : activeView === 'produtos' ? <AcougueProdutos showToast={showToast} />

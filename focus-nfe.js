@@ -152,6 +152,10 @@ function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, cpf_d
     finalidade_emissao: 1,    // normal
     presenca_comprador: 1,    // operação presencial — exigido na NFC-e
     consumidor_final: 1,
+    // local_destino (idDest) é obrigatório na API da Focus. NFC-e de balcão é sempre venda
+    // presencial a consumidor final dentro do estado do emitente → 1 (operação interna).
+    // A SEFAZ não autoriza NFC-e interestadual/exterior a consumidor final presencial.
+    local_destino: 1,
     indicador_inscricao_estadual_destinatario: 9, // não contribuinte
     modalidade_frete: 9,
 

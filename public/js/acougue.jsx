@@ -1512,6 +1512,93 @@
       );
     }
 
+    /* ---- FERRAMENTAS FISCAIS (inutilização e carta de correção) ---- */
+    // Duas operações que a SEFAZ exige e que não cabem no fluxo normal de emissão:
+    //  - Inutilizar: declarar que um intervalo de números não virou nota. Buraco na sequência
+    //    sem inutilização declarada é achado clássico de auditoria.
+    //  - Carta de correção: só existe para NF-e (modelo 55). Para NFC-e a lei não admite —
+    //    nota de consumidor errada se cancela e reemite.
+    function AcougueFerramentasFiscais({ showToast }) {
+      const [aberto, setAberto] = useState(null);
+      const [inut, setInut] = useState({ serie: '9', numero_inicial: '', numero_final: '', justificativa: '' });
+      const [carta, setCarta] = useState({ id: '', correcao: '' });
+      const [enviando, setEnviando] = useState(false);
+
+      const inutilizar = async () => {
+        if (!confirm(`Declarar à SEFAZ que os números ${inut.numero_inicial} a ${inut.numero_final} da série ${inut.serie} não serão usados? Isso não tem volta.`)) return;
+        setEnviando(true);
+        const res = await apiCall('POST', '/acougue/nfce/inutilizar', inut);
+        setEnviando(false);
+        if (res.ok) { showToast('Numeração inutilizada na SEFAZ', 'success'); setInut({ ...inut, numero_inicial: '', numero_final: '', justificativa: '' }); }
+        else showToast(res.data?.error || 'Erro ao inutilizar', 'error');
+      };
+
+      const enviarCarta = async () => {
+        setEnviando(true);
+        const res = await apiCall('POST', `/acougue/nfe/${carta.id}/carta-correcao`, { correcao: carta.correcao });
+        setEnviando(false);
+        if (res.ok) { showToast('Carta de correção registrada na SEFAZ', 'success'); setCarta({ id: '', correcao: '' }); }
+        else showToast(res.data?.error || 'Erro ao enviar', 'error');
+      };
+
+      const Botao = ({ id, icon, children }) => (
+        <button onClick={() => setAberto(aberto === id ? null : id)}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 8,
+            border: `1px solid ${aberto === id ? ACG_ACCENT : 'var(--bp-border2)'}`,
+            background: aberto === id ? `${ACG_ACCENT}18` : 'var(--bp-card)',
+            color: aberto === id ? ACG_ACCENT : 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 13 }}>
+          <i className={`fas ${icon}`}></i>{children}
+        </button>
+      );
+
+      return (
+        <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
+          <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 12px' }}>Ferramentas fiscais</p>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <Botao id="inutilizar" icon="fa-ban">Inutilizar numeração</Botao>
+            <Botao id="carta" icon="fa-pen-to-square">Carta de correção</Botao>
+          </div>
+
+          {aberto === 'inutilizar' && (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--bp-border)' }}>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', lineHeight: 1.6 }}>
+                Use quando um número foi queimado sem virar nota (falha no meio da emissão, salto de numeração).
+                Declara à SEFAZ que aquele intervalo não será usado. <strong>Não tem volta.</strong>
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+                <AcgInput label="Série" value={inut.serie} onChange={e => setInut({ ...inut, serie: e.target.value.replace(/\D/g, '') })} />
+                <AcgInput label="Número inicial" value={inut.numero_inicial} onChange={e => setInut({ ...inut, numero_inicial: e.target.value.replace(/\D/g, '') })} />
+                <AcgInput label="Número final" value={inut.numero_final} onChange={e => setInut({ ...inut, numero_final: e.target.value.replace(/\D/g, '') })} />
+              </div>
+              <AcgInput label="Justificativa" value={inut.justificativa} onChange={e => setInut({ ...inut, justificativa: e.target.value })}
+                placeholder="Mínimo 15 caracteres" hint={`${inut.justificativa.length}/15 caracteres`} />
+              <AcgButton onClick={inutilizar} disabled={enviando || inut.justificativa.trim().length < 15 || !inut.numero_inicial || !inut.numero_final}>
+                {enviando ? 'Enviando...' : 'Inutilizar na SEFAZ'}
+              </AcgButton>
+            </div>
+          )}
+
+          {aberto === 'carta' && (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--bp-border)' }}>
+              <p style={{ color: '#f59e0b', fontSize: 11, margin: '0 0 12px', lineHeight: 1.6 }}>
+                <i className="fas fa-triangle-exclamation" style={{ marginRight: 5 }}></i>
+                Vale só para <strong>NF-e (modelo 55)</strong>. A lei não admite carta de correção para NFC-e do balcão —
+                nesse caso a nota tem que ser cancelada e reemitida. Também não serve para corrigir valor, quantidade ou destinatário.
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
+                <AcgInput label="ID da nota no sistema" value={carta.id} onChange={e => setCarta({ ...carta, id: e.target.value.replace(/\D/g, '') })} placeholder="ex: 12" />
+              </div>
+              <AcgInput label="Texto da correção" value={carta.correcao} onChange={e => setCarta({ ...carta, correcao: e.target.value })}
+                placeholder="Mínimo 15 caracteres" hint={`${carta.correcao.length}/15 caracteres`} />
+              <AcgButton onClick={enviarCarta} disabled={enviando || carta.correcao.trim().length < 15 || !carta.id}>
+                {enviando ? 'Enviando...' : 'Enviar carta de correção'}
+              </AcgButton>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function AcougueNotas({ showToast }) {
       const [notas, setNotas] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -1572,6 +1659,8 @@
           </div>
 
           <AcougueContingencia showToast={showToast} onMudou={load} />
+
+          <AcougueFerramentasFiscais showToast={showToast} />
 
           {!configured && (
             <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 12, padding: '14px 16px', marginBottom: 20, display: 'flex', gap: 12, alignItems: 'flex-start' }}>

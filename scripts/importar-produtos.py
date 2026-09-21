@@ -22,7 +22,7 @@ Uso:
 A senha é lida da variável de ambiente ACOUGUE_SENHA (ou perguntada no terminal), nunca
 passada por argumento — argumento de linha de comando fica gravado no histórico do shell.
 """
-import argparse, json, os, sys, getpass, urllib.request, urllib.error
+import argparse, json, os, re, sys, getpass, urllib.request, urllib.error
 
 try:
     import openpyxl
@@ -124,6 +124,13 @@ def montar_catalogo(fiscal, precos):
         if cest:
             cest = ''.join(ch for ch in cest if ch.isdigit()) or None
 
+        # O CFOP às vezes vem rotulado na planilha ("5102 -  Tributação padrão"). A SEFAZ
+        # espera só os 4 dígitos — mandar o rótulo junto faz a nota ser rejeitada.
+        cfop = texto(f.get('CFOP')) or texto(r.get('Tributação'))
+        if cfop:
+            m = re.match(r'\s*(\d{4})', cfop)
+            cfop = m.group(1) if m else None
+
         catalogo.append({
             'scale_code': codigo,
             'name': str(r.get('Descrição', '')).strip(),
@@ -132,7 +139,7 @@ def montar_catalogo(fiscal, precos):
             'category': categoria,
             'barcode': None,
             'ncm': ncm,
-            'cfop': texto(f.get('CFOP')) or texto(r.get('Tributação')),
+            'cfop': cfop,
             'cest': cest,
             'origem': texto(f.get('ICMS_ORIGEM')) or '0',
             'icms_cst': texto(f.get('ICMS_CST')),

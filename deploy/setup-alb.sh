@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Cria o Application Load Balancer do CS Barber: target group (porta 5000, health
+# Cria o Application Load Balancer do Rei das Carnes: target group (porta 5000, health
 # check /api/health), o próprio ALB (internet-facing, HTTP:80), e libera a
 # instância EC2 pra receber tráfego do ALB. Rode DEPOIS que o app já estiver
 # rodando na instância (deploy/reidascarnes.service ativo).
@@ -86,7 +86,7 @@ ALB_SG_ID=$(aws ec2 describe-security-groups --region "$REGION" \
   --query 'SecurityGroups[0].GroupId' --output text)
 if [ -z "$ALB_SG_ID" ] || [ "$ALB_SG_ID" = "None" ]; then
   ALB_SG_ID=$(aws ec2 create-security-group --region "$REGION" --group-name reidascarnes-alb-sg \
-    --description "CS Barber - trafego publico HTTP para o ALB" --vpc-id "$VPC_ID" --query GroupId --output text)
+    --description "Rei das Carnes - trafego publico HTTP para o ALB" --vpc-id "$VPC_ID" --query GroupId --output text)
   aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$ALB_SG_ID" \
     --ip-permissions "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description='HTTP publico'}]" >/dev/null
   echo "  Criado ($ALB_SG_ID), porta 80 liberada pra internet."

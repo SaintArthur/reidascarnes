@@ -3,9 +3,8 @@
 Sistema de balcão para açougue: caixa com leitor de balança, emissão de NFC-e, controle de
 estoque, rendimento de carcaça e apuração fiscal.
 
-> Nasceu como um módulo dentro de um sistema de barbearia e foi separado em 22/09/2026. Só o
-> que é do açougue permaneceu — as tabelas mantêm o prefixo `acougue_` da época para não
-> quebrar dados já gravados.
+> As tabelas usam o prefixo `acougue_` por herança do desenho original. Renomear exigiria
+> migrar dados já gravados, então os nomes ficaram.
 
 ## O que faz
 

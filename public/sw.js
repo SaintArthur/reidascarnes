@@ -1,4 +1,4 @@
-/* Service Worker — recebe lembretes de agendamento via Web Push, mesmo com a aba fechada */
+/* Service Worker — recebe notificações via Web Push, mesmo com a aba fechada */
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));

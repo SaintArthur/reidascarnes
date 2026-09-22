@@ -1,9 +1,8 @@
     /* ======================================================
        LOGIN — Rei das Carnes
        ======================================================
-       Substituiu o login herdado do sistema de barbearia, que trazia junto multi-idioma,
-       cadastro público e recuperação de senha — nada disso faz sentido num balcão de açougue,
-       onde os usuários são criados pelo dono e o acesso é só da equipe.
+       Sem multi-idioma, sem auto-cadastro e sem recuperação de senha: os usuários são
+       criados pelo dono e o acesso é só da equipe do balcão.
     ====================================================== */
     function LoginPage({ onLogin }) {
       const [email, setEmail] = useState('');

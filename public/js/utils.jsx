@@ -3,7 +3,7 @@
     const API_URL = '/api';
 
     // fmtCur usa sempre o locale pt-BR para a formatação numérica (separadores),
-    // já que a moeda é sempre Real (BRL) — barbearia brasileira, só a língua da
+    // já que a moeda é sempre Real (BRL) — operação brasileira, só a língua da
     // interface muda, não a moeda.
     const fmtCur = n => (n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
     const fmtNum = n => (n || 0).toLocaleString('pt-BR');

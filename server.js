@@ -40,7 +40,7 @@ function logEvent(level, key, params) {
   if (systemLog.length > SYSTEM_LOG_MAX) systemLog.length = SYSTEM_LOG_MAX;
 }
 
-// ─── Web Push (lembretes de agendamento mesmo com a aba fechada) ──────────────
+// ─── Web Push ─────────────────────────────────────────────────────────────────
 // Gera as chaves VAPID uma única vez e persiste no .env para que as assinaturas
 // dos navegadores continuem válidas entre reinicializações do servidor.
 const ENV_PATH = path.join(__dirname, '.env');
@@ -63,7 +63,7 @@ webpush.setVapidDetails('mailto:contato@reidascarnes.com.br', VAPID_PUBLIC_KEY, 
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 // Sem cache-control explícito, o navegador pode reaproveitar (via ETag) uma resposta antiga de
-// GET para a mesma URL — grave numa API cujos dados mudam a cada agendamento/cancelamento (ex:
+// GET para a mesma URL — grave numa API cujos dados mudam a cada venda (ex:
 // horários disponíveis podem parecer "sumir" mesmo depois de liberados). Toda resposta da API
 // deve refletir o estado atual do banco.
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -181,22 +181,11 @@ async function initDatabase() {
   )`);
 
 
-
-
-
-
-
-
-
-
-
-
   await pool.query(`CREATE TABLE IF NOT EXISTS settings (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     key TEXT UNIQUE NOT NULL,
     value TEXT NOT NULL
   )`);
-
 
 
   // ─── Módulo Açougue (role 'acougue') ────────────────────────────────────────
@@ -815,87 +804,37 @@ app.put('/api/auth/password', verifyToken, (req, res) => {
 // ─── Serviços ─────────────────────────────────────────────────────────────────
 
 
-
-
-
-// ─── Agendamentos ─────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
 // ─── Pagamentos ───────────────────────────────────────────────────────────────
-
 
 
 // ─── Avaliações ───────────────────────────────────────────────────────────────
 
 
-
-
-
-
-
-
-
-
 // ─── Promoções ────────────────────────────────────────────────────────────────
-
-
 
 
 // ─── Fila de espera ───────────────────────────────────────────────────────────
 
 
-
-
 // ─── Dashboard & Relatórios ───────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 // ─── Horários de trabalho ─────────────────────────────────────────────────────
 
 
-
 // ─── Ausências ────────────────────────────────────────────────────────────────
-
-
-
-
 
 
 // ─── Solicitações de folga (escala semanal) ───────────────────────────────────
 
 
-
-
-
-
 // ─── Horários bloqueados ──────────────────────────────────────────────────────
-
-
-
 
 
 // ─── Configurações ────────────────────────────────────────────────────────────
 
 
-
 // ─── Relatórios ───────────────────────────────────────────────────────────────
-
 
 
 // ─── Usuário logado ───────────────────────────────────────────────────────────
@@ -928,8 +867,6 @@ app.patch('/api/me', verifyToken, async (req, res) => {
 
 // ─── Notificações (in-app + push) ──────────────────────────────────────────────
 
-const fmtBRL = (n) => `R$ ${Number(n || 0).toFixed(2).replace('.', ',')}`;
-
 
 // Lê um toggle da tabela settings (chave/valor 'true'/'false'). Sem registro = habilitado por padrão.
 function isSettingEnabled(key, cb) {
@@ -937,16 +874,6 @@ function isSettingEnabled(key, cb) {
     cb(!row || row.value !== 'false');
   });
 }
-
-
-
-
-
-// ─── Push notifications (lembrete de agendamento) ─────────────────────────────
-
-
-
-
 
 
 // ─── Módulo Açougue (dashboard financeiro/fiscal, role 'acougue') ────────────
@@ -2921,48 +2848,6 @@ app.get('/api/health', (req, res) => {
 
 // ─── SPA fallback — serve index.html para qualquer rota não-API ──────────────
 
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const generateTimes = (workingHours, bookedRanges, duration = 30, date = null) => {
-  const times = [];
-  const [startHour, startMin] = workingHours.start_time.split(':').map(Number);
-  const [endHour, endMin] = workingHours.end_time.split(':').map(Number);
-  const startTotalMin = startHour * 60 + startMin;
-  const endTotalMin = endHour * 60 + endMin;
-
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-  const isToday = date === todayStr;
-  const nowTotalMin = isToday ? (now.getHours() * 60 + now.getMinutes() + 30) : -1;
-
-  let breakStartMin = -1, breakEndMin = -1;
-  if (workingHours.break_start && workingHours.break_end) {
-    const [bsh, bsm] = workingHours.break_start.split(':').map(Number);
-    const [beh, bem] = workingHours.break_end.split(':').map(Number);
-    breakStartMin = bsh * 60 + bsm;
-    breakEndMin = beh * 60 + bem;
-  }
-
-  // Horários oferecidos sempre em grade fixa de 15 em 15 min (independente da duração do
-  // serviço), para o cliente ter mais opções de horário. A duração do serviço só entra no
-  // cálculo de conflito (isOverlapping) abaixo — por isso, conforme os agendamentos vão sendo
-  // feitos, os slots que passariam a se sobrepor a eles somem sozinhos da lista.
-  const SLOT_INTERVAL_MIN = 15;
-  for (let slotStart = startTotalMin; slotStart + duration <= endTotalMin; slotStart += SLOT_INTERVAL_MIN) {
-    const slotEnd = slotStart + duration;
-    const h = Math.floor(slotStart / 60);
-    const m = slotStart % 60;
-    const time = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-
-    const isPast = isToday && slotStart <= nowTotalMin;
-    const isInBreak = breakStartMin >= 0 && slotStart < breakEndMin && slotEnd > breakStartMin;
-    const isOverlapping = bookedRanges.some(r => slotStart < r.end && slotEnd > r.start);
-
-    if (!isPast && !isInBreak && !isOverlapping) times.push(time);
-  }
-  return times;
-};
 
 initDatabase()
   .then(() => {

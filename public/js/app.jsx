@@ -1,8 +1,7 @@
     /* ======================================================
        RAIZ DO APP — Rei das Carnes
        ======================================================
-       Só existe o perfil do açougue. Os painéis de admin, barbeiro e cliente saíram junto
-       com o resto do sistema de barbearia de onde este projeto nasceu.
+       Só existe o perfil do açougue: quem entra vai direto para o painel do balcão.
     ====================================================== */
     function App() {
       const [user, setUser] = useState(getStoredUser);

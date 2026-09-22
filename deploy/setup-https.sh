@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Configura HTTPS pro CS Barber num domínio próprio: pede um certificado grátis
+# Configura HTTPS pro Rei das Carnes num domínio próprio: pede um certificado grátis
 # no ACM (validado por DNS), e quando ele estiver emitido, cria o listener
 # HTTPS:443 no Load Balancer (e faz o HTTP:80 redirecionar pra HTTPS).
 #

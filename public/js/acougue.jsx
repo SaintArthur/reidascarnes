@@ -1,9 +1,9 @@
     /* ======================================================
        AÇOUGUE DASHBOARD — controle financeiro/fiscal
-       Módulo isolado do fluxo de barbearia: usa /api/acougue/*, role 'acougue'.
+       Todas as telas do sistema: usa /api/acougue/*, perfil 'acougue'.
     ====================================================== */
-    // Mesma paleta dourada usada no resto do sistema (sidebar/botões de admin.jsx e barber.jsx) —
-    // troca o vermelho original por consistência visual com o restante do BarberPro.
+    // Paleta dourada do Rei das Carnes: dourado sobre fundo escuro, legível sob a luz forte
+    // do balcão e com contraste suficiente para telas baratas de PDV.
     const ACG_ACCENT = '#d4a574';
     const ACG_ACCENT_DARK = '#8b7355';
     const ACG_ACCENT_BG = 'rgba(212,165,116,0.12)';

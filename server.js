@@ -527,6 +527,54 @@ async function initDatabase() {
     cofins_valor REAL DEFAULT 0
   )`);
 
+  // ─── Clientes e fiado (caderneta) ──────────────────────────────────────────
+  // Açougue de bairro vende fiado. Sem isso o sistema não substitui o caderno, e é no
+  // caderno que o dinheiro se perde: ninguém lembra quem deve o quê nem desde quando.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_customers (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nome TEXT NOT NULL,
+    documento TEXT,
+    telefone TEXT,
+    endereco TEXT,
+    -- 0 = sem limite definido. O limite existe para o caixa avisar ANTES de fiar, não
+    -- para descobrir depois que o cliente já deve demais.
+    limite_credito REAL DEFAULT 0,
+    observacao TEXT,
+    ativo INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_documento
+    ON acougue_customers(documento) WHERE documento IS NOT NULL AND documento <> '' AND ativo = 1`);
+
+  // Uma linha por dívida. O pagamento é parcial por natureza ("vou adiantar 50"), então
+  // guardamos valor devido e valor já pago em vez de um booleano "quitado".
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_receivables (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    customer_id INTEGER NOT NULL REFERENCES acougue_customers(id) ON DELETE RESTRICT,
+    sale_id INTEGER REFERENCES acougue_sales(id) ON DELETE SET NULL,
+    valor REAL NOT NULL,
+    valor_pago REAL NOT NULL DEFAULT 0,
+    vencimento DATE,
+    quitado_em TIMESTAMP,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_receivables_customer ON acougue_receivables(customer_id) WHERE quitado_em IS NULL');
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_receivable_payments (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    receivable_id INTEGER NOT NULL REFERENCES acougue_receivables(id) ON DELETE CASCADE,
+    valor REAL NOT NULL,
+    forma TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  for (const col of ['customer_id INTEGER REFERENCES acougue_customers(id)',
+                     'vendedor_id INTEGER REFERENCES users(id)']) {
+    await pool.query(`ALTER TABLE acougue_sales ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+
   // ─── Caixa: sessão, sangria e suprimento ───────────────────────────────────
   // Sem controle de gaveta não existe conferência: ninguém sabe se o dinheiro que está lá
   // bate com o que foi vendido. A sessão amarra as vendas a um turno e a um operador, e é o
@@ -2763,7 +2811,7 @@ app.get('/api/acougue/sales/:id', ...acougueOnly, async (req, res) => {
 // meio do loop de itens não pode deixar a venda "meio registrada" com estoque decrementado sem
 // a venda existir, ou vice-versa.
 app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
-  const { items, payment_method, desconto, acrescimo, pagamentos } = req.body;
+  const { items, payment_method, desconto, acrescimo, pagamentos, customer_id, vendedor_id } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: t(reqLang(req), 'Informe ao menos um item') });
   }
@@ -2824,11 +2872,24 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
 
     const { rows: [{ count }] } = await client.query('SELECT COUNT(*)::int as count FROM acougue_sales');
     const saleNumber = `V${String(count + 1).padStart(6, '0')}`;
+    // Fiado exige cliente: dívida sem dono é exatamente o buraco do caderno de papel.
+    const valorFiado = round2(listaPagamentos.filter(p => p.forma === 'credito_loja').reduce((s, p) => s + p.valor, 0));
+    if (valorFiado > 0 && !customer_id) {
+      throw Object.assign(new Error('Venda no fiado precisa de cliente. Selecione quem está levando.'), { code: 'BAD_INPUT' });
+    }
+
     const { rows: [sale] } = await client.query(
-      `INSERT INTO acougue_sales (sale_number, total_value, payment_method, created_by, desconto, acrescimo, troco, cash_session_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [saleNumber, totalFinal, listaPagamentos[0].forma, req.user.id, descontoVenda, acrescimoVenda, troco, sessao?.id || null]
+      `INSERT INTO acougue_sales (sale_number, total_value, payment_method, created_by, desconto, acrescimo, troco, cash_session_id, customer_id, vendedor_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [saleNumber, totalFinal, listaPagamentos[0].forma, req.user.id, descontoVenda, acrescimoVenda, troco, sessao?.id || null,
+       customer_id || null, vendedor_id || null]
     );
+
+    if (valorFiado > 0) {
+      await client.query(
+        'INSERT INTO acougue_receivables (customer_id, sale_id, valor, created_by) VALUES ($1,$2,$3,$4)',
+        [customer_id, sale.id, valorFiado, req.user.id]);
+    }
     for (const pg of listaPagamentos) {
       await client.query('INSERT INTO acougue_sale_payments (sale_id, forma, valor, valor_recebido) VALUES ($1,$2,$3,$4)',
         [sale.id, pg.forma, pg.valor, pg.valor_recebido]);
@@ -3361,6 +3422,207 @@ app.post('/api/acougue/products/:id/conferir-plu', ...acougueOnly, async (req, r
       [confere ? 1 : 0, observacao || null, req.user.id, req.params.id]);
 
     res.json(await db.get('SELECT id, name, scale_code, plu_confere, plu_observacao FROM acougue_products WHERE id = ?', [req.params.id]));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Relatórios de gestão ---- */
+// O que o dono precisa saber e hoje só dava para adivinhar: o que vende, o que dá margem,
+// o que está parado e por onde o dinheiro entra.
+app.get('/api/acougue/reports', ...acougueOnly, async (req, res) => {
+  const de = req.query.de || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const ate = req.query.ate || new Date().toISOString().slice(0, 10);
+  if (de > ate) return res.status(400).json({ error: 'A data inicial não pode ser maior que a final.' });
+  try {
+    const periodo = [de, ate];
+
+    const { rows: [tot] } = await pool.query(
+      `SELECT COALESCE(SUM(total_value),0) AS faturamento, COUNT(*)::int AS vendas,
+              COALESCE(SUM(desconto),0) AS descontos
+       FROM acougue_sales WHERE created_at::date BETWEEN $1 AND $2 AND status = 'concluida'`, periodo);
+
+    const porPagamento = await db.all(
+      `SELECT p.forma, SUM(p.valor) AS total, COUNT(*)::int AS qtd
+       FROM acougue_sale_payments p JOIN acougue_sales s ON s.id = p.sale_id
+       WHERE s.created_at::date BETWEEN ? AND ? AND s.status = 'concluida'
+       GROUP BY p.forma ORDER BY total DESC`, periodo);
+
+    // Margem por produto usa o custo cadastrado. Produto sem custo aparece com margem nula
+    // em vez de margem 100%, que seria mentira confortável.
+    const porProduto = await db.all(
+      `SELECT i.product_name, pr.unit,
+              SUM(i.quantity) AS qtd, SUM(i.subtotal) AS receita,
+              SUM(i.quantity * COALESCE(pr.cost_price,0)) AS custo,
+              MAX(COALESCE(pr.cost_price,0)) AS custo_unit
+       FROM acougue_sale_items i
+       JOIN acougue_sales s ON s.id = i.sale_id
+       LEFT JOIN acougue_products pr ON pr.id = i.product_id
+       WHERE s.created_at::date BETWEEN ? AND ? AND s.status = 'concluida'
+       GROUP BY i.product_name, pr.unit ORDER BY receita DESC LIMIT 50`, periodo);
+
+    const porDia = await db.all(
+      `SELECT created_at::date AS dia, SUM(total_value) AS total, COUNT(*)::int AS vendas
+       FROM acougue_sales WHERE created_at::date BETWEEN ? AND ? AND status = 'concluida'
+       GROUP BY dia ORDER BY dia`, periodo);
+
+    // Ruptura: o que está no catálogo mas sem saldo. É venda perdida silenciosa.
+    const semEstoque = await db.all(
+      `SELECT name, unit, stock_qty FROM acougue_products
+       WHERE active = 1 AND stock_qty <= 0 ORDER BY name LIMIT 30`, []);
+
+    const faturamento = round2(Number(tot.faturamento));
+    const custoTotal = round2(porProduto.reduce((s, p) => s + Number(p.custo || 0), 0));
+    // Sem custo cadastrado o lucro apareceria como 100% da receita — número confortável e
+    // falso, que levaria o dono a achar que está ganhando mais do que ganha. Preferimos não
+    // mostrar margem nenhuma e dizer por quê.
+    const semCusto = porProduto.filter(pp => !Number(pp.custo_unit)).length;
+    const custoConfiavel = porProduto.length > 0 && semCusto < porProduto.length;
+
+    res.json({
+      de, ate,
+      faturamento, vendas: tot.vendas, descontos: round2(Number(tot.descontos)),
+      ticket_medio: tot.vendas ? round2(faturamento / tot.vendas) : 0,
+      custo_total: custoTotal,
+      lucro_bruto: custoConfiavel ? round2(faturamento - custoTotal) : null,
+      margem_pct: (custoConfiavel && faturamento > 0) ? round2(((faturamento - custoTotal) / faturamento) * 100) : null,
+      aviso_margem: custoConfiavel
+        ? (semCusto > 0 ? `${semCusto} produto(s) vendidos não têm custo cadastrado — a margem está superestimada.` : null)
+        : 'Nenhum produto vendido tem custo cadastrado, então não dá para calcular margem. Preencha o custo em Produtos.',
+      por_pagamento: porPagamento.map(p => ({ ...p, total: round2(p.total) })),
+      por_dia: porDia.map(d => ({ ...d, total: round2(d.total) })),
+      por_produto: porProduto.map(p => {
+        const receita = round2(p.receita);
+        const custo = round2(p.custo);
+        return {
+          produto: p.product_name, unit: p.unit, qtd: round3(p.qtd), receita, custo,
+          margem_pct: (receita > 0 && Number(p.custo_unit) > 0) ? round2(((receita - custo) / receita) * 100) : null,
+        };
+      }),
+      sem_estoque: semEstoque,
+      produtos_sem_custo: porProduto.filter(p => !Number(p.custo_unit)).length,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Clientes e fiado ---- */
+app.get('/api/acougue/customers', ...acougueOnly, async (req, res) => {
+  try {
+    const busca = String(req.query.q || '').trim();
+    const params = [];
+    let filtro = 'WHERE c.ativo = 1';
+    if (busca) {
+      params.push(`%${busca.toLowerCase()}%`);
+      filtro += ` AND (LOWER(c.nome) LIKE $${params.length} OR c.documento LIKE $${params.length} OR c.telefone LIKE $${params.length})`;
+    }
+    // O saldo devedor vem junto: é a informação que o balcão precisa antes de fiar de novo.
+    const { rows } = await pool.query(
+      `SELECT c.*,
+         COALESCE((SELECT SUM(r.valor - r.valor_pago) FROM acougue_receivables r
+                   WHERE r.customer_id = c.id AND r.quitado_em IS NULL), 0) AS saldo_devedor
+       FROM acougue_customers c ${filtro} ORDER BY c.nome LIMIT 200`, params);
+    res.json(rows.map(c => ({ ...c, saldo_devedor: round2(c.saldo_devedor) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/acougue/customers', ...acougueOnly, async (req, res) => {
+  const { nome, documento, telefone, endereco, limite_credito, observacao } = req.body || {};
+  if (!String(nome || '').trim()) return res.status(400).json({ error: 'Informe o nome do cliente.' });
+  try {
+    const { rows } = await db.run(
+      'INSERT INTO acougue_customers (nome, documento, telefone, endereco, limite_credito, observacao) VALUES (?,?,?,?,?,?)',
+      [String(nome).trim(), documento || null, telefone || null, endereco || null, Number(limite_credito) || 0, observacao || null]);
+    res.status(201).json({ id: rows[0].id, nome, saldo_devedor: 0 });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Já existe um cliente com este documento.' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/acougue/customers/:id', ...acougueOnly, async (req, res) => {
+  try {
+    const atual = await db.get('SELECT * FROM acougue_customers WHERE id = ?', [req.params.id]);
+    if (!atual) return res.status(404).json({ error: 'Cliente não encontrado' });
+    const n = {};
+    ['nome', 'documento', 'telefone', 'endereco', 'limite_credito', 'observacao']
+      .forEach(f => { n[f] = req.body[f] !== undefined ? req.body[f] : atual[f]; });
+    await db.run('UPDATE acougue_customers SET nome=?, documento=?, telefone=?, endereco=?, limite_credito=?, observacao=? WHERE id=?',
+      [n.nome, n.documento, n.telefone, n.endereco, Number(n.limite_credito) || 0, n.observacao, req.params.id]);
+    res.json({ id: Number(req.params.id), ...n });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Extrato do cliente: o que deve, desde quando, e o que já pagou.
+app.get('/api/acougue/customers/:id/extrato', ...acougueOnly, async (req, res) => {
+  try {
+    const cliente = await db.get('SELECT * FROM acougue_customers WHERE id = ?', [req.params.id]);
+    if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado' });
+    const dividas = await db.all(
+      `SELECT r.*, s.sale_number, (r.valor - r.valor_pago) AS saldo
+       FROM acougue_receivables r LEFT JOIN acougue_sales s ON s.id = r.sale_id
+       WHERE r.customer_id = ? ORDER BY r.quitado_em NULLS FIRST, r.created_at DESC LIMIT 100`, [req.params.id]);
+    const saldo = round2(dividas.filter(d => !d.quitado_em).reduce((s, d) => s + Number(d.saldo), 0));
+    const maisAntiga = dividas.find(d => !d.quitado_em);
+    res.json({
+      cliente, saldo_devedor: saldo, dividas,
+      dias_divida_mais_antiga: maisAntiga
+        ? Math.floor((Date.now() - new Date(maisAntiga.created_at).getTime()) / 86400000) : null,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Recebe (total ou parcial) uma dívida.
+app.post('/api/acougue/receivables/:id/pagar', ...acougueOnly, async (req, res) => {
+  const valor = Number(req.body?.valor);
+  if (!(valor > 0)) return res.status(400).json({ error: 'Informe um valor maior que zero.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [d] } = await client.query('SELECT * FROM acougue_receivables WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (!d) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Dívida não encontrada' }); }
+    if (d.quitado_em) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta dívida já está quitada.' }); }
+
+    const saldo = round2(Number(d.valor) - Number(d.valor_pago));
+    if (valor > saldo + 0.01) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `O saldo desta dívida é ${saldo.toFixed(2)}; não dá para receber ${valor.toFixed(2)}.` });
+    }
+
+    const novoPago = round2(Number(d.valor_pago) + valor);
+    const quitou = novoPago >= round2(Number(d.valor)) - 0.01;
+    await client.query('UPDATE acougue_receivables SET valor_pago = $1, quitado_em = $2 WHERE id = $3',
+      [novoPago, quitou ? new Date() : null, req.params.id]);
+    await client.query('INSERT INTO acougue_receivable_payments (receivable_id, valor, forma, created_by) VALUES ($1,$2,$3,$4)',
+      [req.params.id, valor, req.body?.forma || 'dinheiro', req.user.id]);
+    await client.query('COMMIT');
+    res.json({ id: Number(req.params.id), valor_pago: novoPago, quitado: quitou, saldo_restante: round2(Number(d.valor) - novoPago) });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Panorama do fiado: quanto está na rua e quem mais deve.
+app.get('/api/acougue/receivables/resumo', ...acougueOnly, async (req, res) => {
+  try {
+    const { rows: [tot] } = await pool.query(
+      `SELECT COALESCE(SUM(valor - valor_pago), 0) AS total, COUNT(*)::int AS dividas,
+              COUNT(DISTINCT customer_id)::int AS clientes
+       FROM acougue_receivables WHERE quitado_em IS NULL`);
+    const devedores = await db.all(
+      `SELECT c.id, c.nome, c.telefone, c.limite_credito,
+              SUM(r.valor - r.valor_pago) AS saldo,
+              MIN(r.created_at) AS desde
+       FROM acougue_receivables r JOIN acougue_customers c ON c.id = r.customer_id
+       WHERE r.quitado_em IS NULL GROUP BY c.id, c.nome, c.telefone, c.limite_credito
+       ORDER BY saldo DESC LIMIT 50`, []);
+    res.json({
+      total_na_rua: round2(Number(tot.total)), dividas: tot.dividas, clientes: tot.clientes,
+      devedores: devedores.map(d => ({
+        ...d, saldo: round2(d.saldo),
+        dias: Math.floor((Date.now() - new Date(d.desde).getTime()) / 86400000),
+        // Sinaliza quem passou do limite combinado — é onde o prejuízo costuma nascer.
+        acima_do_limite: Number(d.limite_credito) > 0 && round2(d.saldo) > Number(d.limite_credito),
+      })),
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

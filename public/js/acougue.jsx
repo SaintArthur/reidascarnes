@@ -26,7 +26,9 @@
         { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos' },
         { id: 'conferencia', icon: 'fas fa-clipboard-check', label: 'Conferir Etiquetas' },
         { id: 'caixa', icon: 'fas fa-cash-register', label: 'Caixa' },
+        { id: 'clientes', icon: 'fas fa-users', label: 'Clientes e Fiado' },
         { id: 'notas', icon: 'fas fa-file-invoice', label: 'Emissão de Nota' },
+        { id: 'relatorios', icon: 'fas fa-chart-column', label: 'Relatórios' },
         { id: 'impostos', icon: 'fas fa-percent', label: 'PIS / COFINS' },
         { id: 'config', icon: 'fas fa-gear', label: 'Configurações' },
       ];
@@ -1047,6 +1049,280 @@
       frame.contentWindow.focus();
       frame.contentWindow.print();
       setTimeout(() => frame.remove(), 60000);
+    }
+
+    /* ---- RELATÓRIOS DE GESTÃO ---- */
+    function AcougueRelatorios({ showToast }) {
+      const hoje = new Date().toISOString().slice(0, 10);
+      const trintaDias = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+      const [de, setDe] = useState(trintaDias);
+      const [ate, setAte] = useState(hoje);
+      const [dados, setDados] = useState(null);
+      const [carregando, setCarregando] = useState(false);
+
+      const carregar = async () => {
+        setCarregando(true);
+        const res = await apiCall('GET', `/acougue/reports?de=${de}&ate=${ate}`);
+        setCarregando(false);
+        if (res.ok) setDados(res.data); else showToast(res.data?.error || 'Erro', 'error');
+      };
+      useEffect(() => { carregar(); }, []);
+
+      const maxDia = dados?.por_dia?.length ? Math.max(...dados.por_dia.map(d => d.total)) : 0;
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-chart-column" title="Relatórios" subtitle="O que vende, o que dá margem e por onde o dinheiro entra" />
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+              <AcgInput label="De" type="date" value={de} onChange={e => setDe(e.target.value)} />
+              <AcgInput label="Até" type="date" value={ate} onChange={e => setAte(e.target.value)} />
+            </div>
+            <AcgButton onClick={carregar} disabled={carregando}>{carregando ? 'Carregando...' : 'Atualizar'}</AcgButton>
+          </div>
+
+          {dados && (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+                <AcgCard label="Faturamento" value={fmtCur(dados.faturamento)} icon="fa-sack-dollar" color="#10b981" bg="rgba(16,185,129,0.12)" />
+                <AcgCard label="Vendas" value={String(dados.vendas)} icon="fa-receipt" color="#38bdf8" bg="rgba(56,189,248,0.12)" />
+                <AcgCard label="Ticket médio" value={fmtCur(dados.ticket_medio)} icon="fa-tag" color="#a78bfa" bg="rgba(167,139,250,0.12)" />
+                <AcgCard label="Margem" value={dados.margem_pct != null ? `${dados.margem_pct}%` : '—'} icon="fa-percent"
+                  color={ACG_ACCENT} bg={`${ACG_ACCENT}22`} />
+              </div>
+
+              {dados.aviso_margem && (
+                <p style={{ color: '#f59e0b', fontSize: 12, margin: '0 0 16px', lineHeight: 1.6 }}>
+                  <i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>{dados.aviso_margem}
+                </p>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16, marginBottom: 16 }}>
+                <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18 }}>
+                  <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 12px' }}>Por forma de pagamento</p>
+                  {dados.por_pagamento.length === 0 ? <p style={{ color: 'var(--bp-text-faint)', fontSize: 12 }}>Sem vendas no período</p> :
+                    dados.por_pagamento.map(f => (
+                      <div key={f.forma} style={{ marginBottom: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--bp-text-secondary)', marginBottom: 3 }}>
+                          <span>{acgLabelPagamento(f.forma)}</span><strong style={{ color: 'var(--bp-text)' }}>{fmtCur(f.total)}</strong>
+                        </div>
+                        <div style={{ height: 6, borderRadius: 3, background: 'var(--bp-card)' }}>
+                          <div style={{ height: '100%', borderRadius: 3, background: ACG_ACCENT,
+                            width: `${dados.faturamento > 0 ? (f.total / dados.faturamento) * 100 : 0}%` }}></div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+
+                <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18 }}>
+                  <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 12px' }}>Faturamento por dia</p>
+                  {dados.por_dia.length === 0 ? <p style={{ color: 'var(--bp-text-faint)', fontSize: 12 }}>Sem vendas no período</p> : (
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 90 }}>
+                      {dados.por_dia.map(d => (
+                        <div key={d.dia} title={`${fmtDate(d.dia)}: ${fmtCur(d.total)}`}
+                          style={{ flex: 1, minWidth: 4, borderRadius: '3px 3px 0 0', background: ACG_ACCENT,
+                            height: `${maxDia > 0 ? Math.max(4, (d.total / maxDia) * 100) : 4}%` }}></div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 10px' }}>Produtos mais vendidos</p>
+              <AcgTable
+                emptyLabel="Sem vendas no período"
+                columns={[
+                  { key: 'produto', label: 'Produto' },
+                  { key: 'qtd', label: 'Qtd', align: 'right', render: r => `${r.qtd} ${r.unit || ''}` },
+                  { key: 'receita', label: 'Receita', align: 'right', render: r => fmtCur(r.receita) },
+                  { key: 'margem_pct', label: 'Margem', align: 'right', render: r => r.margem_pct == null
+                    ? <span style={{ color: 'var(--bp-text-faint)' }} title="produto sem custo cadastrado">sem custo</span>
+                    : <span style={{ color: r.margem_pct < 15 ? '#f59e0b' : '#10b981' }}>{r.margem_pct}%</span> },
+                ]}
+                rows={dados.por_produto}
+              />
+
+              {dados.sem_estoque.length > 0 && (
+                <div style={{ marginTop: 20 }}>
+                  <p className="syne" style={{ color: '#f59e0b', fontWeight: 700, fontSize: 14, margin: '0 0 4px' }}>
+                    <i className="fas fa-box-open" style={{ marginRight: 6 }}></i>Sem estoque ({dados.sem_estoque.length})
+                  </p>
+                  <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 10px' }}>
+                    Produto no catálogo sem saldo é venda perdida que ninguém registra.
+                  </p>
+                  <AcgTable
+                    emptyLabel="Tudo com estoque"
+                    columns={[
+                      { key: 'name', label: 'Produto' },
+                      { key: 'stock_qty', label: 'Saldo', align: 'right', render: r => `${Number(r.stock_qty).toFixed(3)} ${r.unit}` },
+                    ]}
+                    rows={dados.sem_estoque}
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    /* ---- CLIENTES E FIADO ---- */
+    function AcougueClientes({ showToast }) {
+      const [resumo, setResumo] = useState(null);
+      const [clientes, setClientes] = useState([]);
+      const [busca, setBusca] = useState('');
+      const [form, setForm] = useState(null);
+      const [extrato, setExtrato] = useState(null);
+      const [pagando, setPagando] = useState({});
+
+      const load = async () => {
+        const [r1, r2] = await Promise.all([
+          apiCall('GET', '/acougue/receivables/resumo'),
+          apiCall('GET', `/acougue/customers${busca ? `?q=${encodeURIComponent(busca)}` : ''}`),
+        ]);
+        if (r1.ok) setResumo(r1.data);
+        if (r2.ok) setClientes(r2.data);
+      };
+      useEffect(() => { load(); }, [busca]);
+
+      const salvar = async () => {
+        if (!form.nome?.trim()) { showToast('Informe o nome', 'error'); return; }
+        const res = form.id
+          ? await apiCall('PATCH', `/acougue/customers/${form.id}`, form)
+          : await apiCall('POST', '/acougue/customers', form);
+        if (res.ok) { showToast(form.id ? 'Cliente atualizado' : 'Cliente cadastrado', 'success'); setForm(null); load(); }
+        else showToast(res.data?.error || 'Erro ao salvar', 'error');
+      };
+
+      const abrirExtrato = async (id) => {
+        const res = await apiCall('GET', `/acougue/customers/${id}/extrato`);
+        if (res.ok) setExtrato(res.data); else showToast(res.data?.error || 'Erro', 'error');
+      };
+
+      const receber = async (dividaId) => {
+        const valor = Number(pagando[dividaId]);
+        if (!(valor > 0)) { showToast('Informe o valor recebido', 'error'); return; }
+        const res = await apiCall('POST', `/acougue/receivables/${dividaId}/pagar`, { valor });
+        if (res.ok) {
+          showToast(res.data.quitado ? 'Dívida quitada' : `Recebido — restam ${fmtCur(res.data.saldo_restante)}`, 'success');
+          setPagando({ ...pagando, [dividaId]: '' });
+          abrirExtrato(extrato.cliente.id); load();
+        } else showToast(res.data?.error || 'Erro ao receber', 'error');
+      };
+
+      if (!resumo) return <AcgSpinner />;
+
+      return (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+            <AcgSectionTitle icon="fa-users" title="Clientes e Fiado" subtitle="Quem deve, quanto e desde quando" />
+            <AcgButton onClick={() => setForm({ nome: '', telefone: '', documento: '', limite_credito: 0 })}>
+              <i className="fas fa-plus" style={{ marginRight: 6 }}></i>Novo cliente
+            </AcgButton>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 20 }}>
+            <AcgCard label="Fiado na rua" value={fmtCur(resumo.total_na_rua)} icon="fa-hand-holding-dollar" color="#f59e0b" bg="rgba(245,158,11,0.12)" />
+            <AcgCard label="Dívidas abertas" value={String(resumo.dividas)} icon="fa-receipt" color="#a78bfa" bg="rgba(167,139,250,0.12)" />
+            <AcgCard label="Clientes devendo" value={String(resumo.clientes)} icon="fa-users" color="#38bdf8" bg="rgba(56,189,248,0.12)" />
+            <AcgCard label="Acima do limite" value={String(resumo.devedores.filter(d => d.acima_do_limite).length)} icon="fa-triangle-exclamation" color="#ef4444" bg="rgba(239,68,68,0.12)" />
+          </div>
+
+          {form && (
+            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, marginBottom: 20 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
+                <AcgInput label="Nome" value={form.nome || ''} onChange={e => setForm({ ...form, nome: e.target.value })} required />
+                <AcgInput label="Telefone" value={form.telefone || ''} onChange={e => setForm({ ...form, telefone: e.target.value })} />
+                <AcgInput label="CPF/CNPJ" value={form.documento || ''} onChange={e => setForm({ ...form, documento: e.target.value })} />
+                <AcgInput label="Limite de fiado (R$)" type="number" step="0.01" min="0" value={form.limite_credito || ''}
+                  onChange={e => setForm({ ...form, limite_credito: e.target.value })} hint="0 = sem limite definido" />
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <AcgButton onClick={salvar}>Salvar</AcgButton>
+                <AcgButton variant="ghost" onClick={() => setForm(null)}>Cancelar</AcgButton>
+              </div>
+            </div>
+          )}
+
+          {resumo.devedores.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 10px' }}>Quem está devendo</p>
+              <AcgTable
+                emptyLabel="Ninguém devendo"
+                columns={[
+                  { key: 'nome', label: 'Cliente' },
+                  { key: 'telefone', label: 'Telefone', render: r => r.telefone || '—' },
+                  { key: 'saldo', label: 'Deve', align: 'right', render: r => (
+                    <strong style={{ color: r.acima_do_limite ? '#ef4444' : 'var(--bp-text)' }}>{fmtCur(r.saldo)}</strong>
+                  ) },
+                  { key: 'limite_credito', label: 'Limite', align: 'right', render: r => Number(r.limite_credito) > 0 ? fmtCur(r.limite_credito) : '—' },
+                  { key: 'dias', label: 'Há', align: 'right', render: r => `${r.dias} dia(s)` },
+                  { key: 'acao', label: '', align: 'right', render: r => (
+                    <button onClick={() => abrirExtrato(r.id)} style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12 }}>extrato</button>
+                  ) },
+                ]}
+                rows={resumo.devedores}
+              />
+            </div>
+          )}
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: 0 }}>Todos os clientes</p>
+            <input value={busca} onChange={e => setBusca(e.target.value)} placeholder="buscar por nome, telefone ou documento..."
+              style={{ flex: 1, minWidth: 200, padding: '7px 11px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12 }} />
+          </div>
+          <AcgTable
+            emptyLabel="Nenhum cliente cadastrado"
+            columns={[
+              { key: 'nome', label: 'Nome' },
+              { key: 'telefone', label: 'Telefone', render: r => r.telefone || '—' },
+              { key: 'saldo_devedor', label: 'Deve', align: 'right', render: r => r.saldo_devedor > 0 ? <strong style={{ color: '#f59e0b' }}>{fmtCur(r.saldo_devedor)}</strong> : '—' },
+              { key: 'acao', label: '', align: 'right', render: r => (
+                <>
+                  <button onClick={() => abrirExtrato(r.id)} style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12, marginRight: 10 }}>extrato</button>
+                  <button onClick={() => setForm(r)} style={{ background: 'none', border: 'none', color: 'var(--bp-text-faint)', cursor: 'pointer', fontSize: 12 }}>editar</button>
+                </>
+              ) },
+            ]}
+            rows={clientes}
+          />
+
+          {extrato && (
+            <div style={{ marginTop: 20, background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 15, margin: 0 }}>{extrato.cliente.nome}</p>
+                <button onClick={() => setExtrato(null)} style={{ background: 'none', border: 'none', color: 'var(--bp-text-faint)', cursor: 'pointer' }}>fechar</button>
+              </div>
+              <p style={{ color: 'var(--bp-text-secondary)', fontSize: 13, margin: '0 0 14px' }}>
+                Deve <strong style={{ color: '#f59e0b' }}>{fmtCur(extrato.saldo_devedor)}</strong>
+                {extrato.dias_divida_mais_antiga != null && <> — a mais antiga há {extrato.dias_divida_mais_antiga} dia(s)</>}
+              </p>
+              <AcgTable
+                emptyLabel="Sem dívidas"
+                columns={[
+                  { key: 'created_at', label: 'Data', render: r => fmtDate(r.created_at) },
+                  { key: 'sale_number', label: 'Venda', render: r => r.sale_number || '—' },
+                  { key: 'valor', label: 'Valor', align: 'right', render: r => fmtCur(r.valor) },
+                  { key: 'valor_pago', label: 'Pago', align: 'right', render: r => fmtCur(r.valor_pago) },
+                  { key: 'saldo', label: 'Resta', align: 'right', render: r => r.quitado_em
+                    ? <span style={{ color: '#10b981' }}>quitada</span>
+                    : <strong>{fmtCur(r.saldo)}</strong> },
+                  { key: 'receber', label: '', align: 'right', render: r => r.quitado_em ? null : (
+                    <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                      <input type="number" step="0.01" min="0" value={pagando[r.id] || ''} placeholder="valor"
+                        onChange={e => setPagando({ ...pagando, [r.id]: e.target.value })}
+                        style={{ width: 80, padding: '4px 6px', borderRadius: 6, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12 }} />
+                      <button onClick={() => receber(r.id)} style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12 }}>receber</button>
+                    </div>
+                  ) },
+                ]}
+                rows={extrato.dividas}
+              />
+            </div>
+          )}
+        </div>
+      );
     }
 
     /* ---- PRECIFICAÇÃO PELO RENDIMENTO ---- */
@@ -2689,7 +2965,9 @@
                 : activeView === 'produtos' ? <AcougueProdutos showToast={showToast} />
                 : activeView === 'conferencia' ? <AcougueConferencia showToast={showToast} />
                 : activeView === 'caixa' ? <AcougueCaixa showToast={showToast} />
+                : activeView === 'clientes' ? <AcougueClientes showToast={showToast} />
                 : activeView === 'notas' ? <AcougueNotas showToast={showToast} />
+                : activeView === 'relatorios' ? <AcougueRelatorios showToast={showToast} />
                 : activeView === 'impostos' ? <AcougueImpostos showToast={showToast} />
                 : activeView === 'config' ? <AcougueConfig showToast={showToast} />
                 : null}

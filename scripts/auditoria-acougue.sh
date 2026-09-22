@@ -69,6 +69,19 @@ check "margem acima de 99"         400 "$(st "$API/api/acougue/pricing/carcass/1
 check "margem negativa"            400 "$(st "$API/api/acougue/pricing/carcass/1?margem=-10" -H "$H")"
 check "análise da carcaça"         200 "$(st "$API/api/acougue/pricing/carcass/1?margem=30" -H "$H")"
 
+echo "── CLIENTES E FIADO ──"
+check "cliente sem nome"           400 "$(st -X POST $API/api/acougue/customers -H "$H" -H "$J" -d '{}')"
+check "listar clientes"            200 "$(st "$API/api/acougue/customers" -H "$H")"
+check "extrato inexistente"        404 "$(st "$API/api/acougue/customers/999999/extrato" -H "$H")"
+check "resumo do fiado"            200 "$(st "$API/api/acougue/receivables/resumo" -H "$H")"
+check "pagar dívida inexistente"   404 "$(st -X POST $API/api/acougue/receivables/999999/pagar -H "$H" -H "$J" -d '{"valor":10}')"
+check "pagar valor zero"           400 "$(st -X POST $API/api/acougue/receivables/1/pagar -H "$H" -H "$J" -d '{"valor":0}')"
+check "fiado sem cliente"          400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"pagamentos\":[{\"forma\":\"credito_loja\",\"valor\":29.99}]}")"
+
+echo "── RELATÓRIOS ──"
+check "relatório padrão"           200 "$(st "$API/api/acougue/reports" -H "$H")"
+check "data inicial maior"         400 "$(st "$API/api/acougue/reports?de=2026-12-01&ate=2026-01-01" -H "$H")"
+
 echo "── SEGURANÇA ──"
 check "sem token"                  401 "$(st "$API/api/acougue/products")"
 check "token inválido"             401 "$(st "$API/api/acougue/products" -H 'Authorization: Bearer xxx')"

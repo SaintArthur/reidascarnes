@@ -39,11 +39,18 @@
       .login-aviso { display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px; border-radius: 10px; font-size: 13px; line-height: 1.45; }
       .login-marca-item { display: flex; gap: 12px; align-items: flex-start; }
       .login-marca-item i { width: 34px; height: 34px; border-radius: 9px; background: rgba(212,165,116,0.14); color: #d4a574; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+      /* O logo é o herói desta metade da tela: a imagem já é a marca, o texto ao lado só a nomeia.
+         clamp() em vw para ele crescer no monitor do escritório sem estourar o notebook. */
+      .login-logo { display: block; width: clamp(168px, 20vw, 260px); height: auto; border-radius: 24px;
+        box-shadow: 0 34px 64px -30px rgba(212,165,116,0.85); }
       @media (max-width: 860px) {
         .login-raiz { grid-template-columns: 1fr; }
-        .login-marca { padding: 28px 24px 22px; }
+        .login-marca { padding: 26px 24px 20px; }
         .login-marca-lista, .login-marca-rodape { display: none; }
         .login-form-area { padding: 24px 16px 40px; align-items: flex-start; }
+        /* No celular a marca divide a tela com o formulário — logo grande aqui empurraria os
+           campos para baixo da dobra. */
+        .login-logo { width: 104px; border-radius: 16px; }
       }
     `;
 
@@ -139,28 +146,20 @@
 
           <section className="login-marca" aria-label="Sobre o sistema">
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 34 }}>
-                <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(135deg, #d4a574, #8b7355)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 12px 30px -14px rgba(212,165,116,0.9)' }}>
-                  <i className="fas fa-drumstick-bite" style={{ color: '#1a1206', fontSize: 18 }}></i>
+              <div style={{ marginBottom: 30 }}>
+                <img src="/img/logo-rei-das-carnes.webp" alt="" className="login-logo" />
+                <div className="syne" style={{ fontSize: 'clamp(22px, 2.4vw, 30px)', fontWeight: 800, letterSpacing: -0.5, lineHeight: 1.05, marginTop: 18 }}>
+                  {marca.nome === 'Rei das Carnes'
+                    ? <span>REI DAS <span style={{ color: '#d4a574' }}>CARNES</span></span>
+                    : <span>{marca.nome}</span>}
                 </div>
-                <div>
-                  <div className="syne" style={{ fontSize: 20, fontWeight: 800, letterSpacing: -0.4, lineHeight: 1.05 }}>
-                    {marca.nome === 'Rei das Carnes'
-                      ? <span>REI DAS <span style={{ color: '#d4a574' }}>CARNES</span></span>
-                      : <span>{marca.nome}</span>}
-                  </div>
-                  <div style={{ fontSize: 11.5, color: 'rgba(243,237,228,0.55)', letterSpacing: '.08em', textTransform: 'uppercase' }}>Sistema de gestão do açougue</div>
-                </div>
+                <div style={{ fontSize: 12, color: 'rgba(243,237,228,0.55)', letterSpacing: '.08em', textTransform: 'uppercase', marginTop: 4 }}>Sistema de gestão do açougue</div>
               </div>
 
-              <h1 className="syne" style={{ fontSize: 'clamp(26px, 3.2vw, 38px)', fontWeight: 700, lineHeight: 1.12, letterSpacing: -0.6, margin: '0 0 14px', maxWidth: 520 }}>
+              <h1 className="syne" style={{ fontSize: 'clamp(24px, 2.8vw, 33px)', fontWeight: 700, lineHeight: 1.12, letterSpacing: -0.6, margin: '0 0 14px', maxWidth: 520 }}>
                 O balcão, o fiscal e o estoque<br />no mesmo lugar.
               </h1>
-              <p style={{ color: 'rgba(243,237,228,0.7)', fontSize: 14.5, lineHeight: 1.6, margin: 0, maxWidth: 460 }}>
-                Entre com o usuário que o dono do açougue criou para você.
-              </p>
-
-              <div className="login-marca-lista" style={{ display: 'grid', gap: 16, marginTop: 38, maxWidth: 440 }}>
+              <div className="login-marca-lista" style={{ display: 'grid', gap: 16, marginTop: 30, maxWidth: 440 }}>
                 {[
                   ['fa-cash-register', 'Caixa com leitor de balança', 'Bipou a etiqueta, o peso e o preço já entram. Troco, desconto e pagamento dividido.'],
                   ['fa-file-invoice', 'NFC-e a cada venda', 'Emissão, consulta e cancelamento pela Focus NFe, com contingência quando a SEFAZ cai.'],

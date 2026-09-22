@@ -38,6 +38,12 @@ function dataEmissaoLocal(d = new Date()) {
 function statusInterno(result) {
   const s = result?.data?.status;
   if (s === 'autorizado') return 'autorizada';
+  // `cancelado` e `denegado` vêm da consulta e caíam no `return 'processando'` lá embaixo:
+  // uma nota DENEGADA pela SEFAZ (irregularidade fiscal do emitente ou do destinatário)
+  // aparecia no sistema como se ainda estivesse em andamento, esperando uma autorização que
+  // nunca vem. Denegada é definitiva e consome o número — não se reemite nem se cancela.
+  if (s === 'cancelado') return 'cancelada';
+  if (s === 'denegado') return 'denegada';
   if (s === 'erro_autorizacao' || s === 'erro') return 'erro';
   if (!result?.ok) return 'erro';
   return 'processando'; // NF-e modelo 55 é assíncrona e pode legitimamente cair aqui
@@ -134,6 +140,9 @@ function buildNFePayload({ tipo, emitente, destinatario, itens, natureza_operaca
       unidade_tributavel: item.unidade || 'KG',
       quantidade_tributavel: item.quantidade,
       valor_unitario_tributavel: item.valor_unitario,
+      // Mesmo nome de campo da NFC-e (a Focus usa o mesmo schema de item nos dois modelos) e
+      // igualmente obrigatório. 0 = nacional, que é o caso da carcaça comprada de produtor.
+      icms_origem: item.origem ?? '0',
       icms_situacao_tributaria: '102', // Simples Nacional sem permissão de crédito — ajustar conforme o regime real do açougue
       pis_situacao_tributaria: '01',
       cofins_situacao_tributaria: '01',
@@ -297,7 +306,12 @@ function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, pagam
       unidade_tributavel: item.unidade,
       quantidade_tributavel: item.quantidade,
       valor_unitario_tributavel: item.valor_unitario,
-      origem_mercadoria: item.origem ?? '0',
+      // `icms_origem`, NÃO `origem_mercadoria`. O nome estava errado desde que este adaptador
+      // foi escrito, e o campo é obrigatório em todo item: a Focus ignora a chave desconhecida
+      // e a nota seguia sem a origem da mercadoria, que a SEFAZ recusa. Ou seja, nenhuma NFC-e
+      // emitida por aqui seria autorizada. Conferido contra
+      // doc.focusnfe.com.br/reference/emitir_nfce em 22/09/2026.
+      icms_origem: item.origem ?? '0',
       icms_situacao_tributaria: item.icms_cst,
       icms_aliquota: item.icms_aliquota ?? undefined,
       icms_base_calculo: item.icms_base_calculo ?? undefined,

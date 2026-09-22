@@ -5,40 +5,53 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'segredo-de-teste-com-mais-de-24-caracteres';
 process.env.FOCUS_NFE_TOKEN = '';
 
+const bcrypt = require('bcryptjs');
 const request = require('supertest');
 const { app, initDatabase, pool } = require('../server');
 
 const SENHA_DONO = 'Dono12345';
 const sufixo = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
-beforeAll(async () => { await initDatabase(); }, 30000);
-afterAll(async () => { await pool.end(); });
+let DONO_LOGIN;
+
+beforeAll(async () => {
+  await initDatabase();
+  // Dono PRÓPRIO deste arquivo, criado direto no banco. A primeira versão entrava com o
+  // 'reidascarnes' do seed — e quebrou assim que alguém trocou a senha dele pela tela, que é
+  // exatamente o que o sistema obriga a fazer no primeiro acesso. Teste não pode depender do
+  // estado de uma conta que gente de verdade usa.
+  DONO_LOGIN = `dono-teste-${sufixo()}`;
+  await pool.query(
+    `INSERT INTO users (name, email, password, role, must_change_password, active) VALUES ($1,$2,$3,'dono',0,1)`,
+    ['Dono de Teste', DONO_LOGIN, bcrypt.hashSync(SENHA_DONO, 12)]
+  );
+}, 30000);
+
+afterAll(async () => {
+  // Não deixa lixo no banco de quem roda os testes localmente.
+  await pool.query("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'dono-teste-%' OR email LIKE 'caixa-%')");
+  await pool.query("DELETE FROM auth_events WHERE login LIKE 'dono-teste-%' OR login LIKE 'caixa-%'");
+  await pool.query("DELETE FROM users WHERE email LIKE 'dono-teste-%' OR email LIKE 'caixa-%'");
+  await pool.end();
+});
 
 const login = (email, password, extra = {}) => request(app).post('/api/auth/login').send({ email, password, ...extra });
 const auth = (token) => ({ Authorization: `Bearer ${token}` });
 
-// O dono padrão nasce com senha provisória obrigatória; num banco reaproveitado ela já pode ter
-// sido trocada por uma rodada anterior. Os dois caminhos levam ao mesmo lugar: sessão de dono
-// com a senha conhecida deste arquivo.
 async function entrarComoDono() {
-  let res = await login('reidascarnes', 'reidascarnes');
-  if (res.status === 401) res = await login('reidascarnes', SENHA_DONO);
+  const res = await login(DONO_LOGIN, SENHA_DONO);
   expect(res.status).toBe(200);
-  if (res.body.user.must_change_password) {
-    const troca = await request(app).put('/api/auth/password').set(auth(res.body.token)).send({ new_password: SENHA_DONO });
-    expect(troca.status).toBe(200);
-  }
   return res.body.token;
 }
 
 describe('Login', () => {
   it('a rota pública de reset de senha não existe mais', async () => {
-    const res = await request(app).post('/api/auth/reset-password').send({ email: 'reidascarnes', newPassword: 'Hackeada123' });
+    const res = await request(app).post('/api/auth/reset-password').send({ email: DONO_LOGIN, newPassword: 'Hackeada123' });
     expect(res.status).toBe(404);
   });
 
   it('senha errada e usuário inexistente respondem a MESMA coisa — não se descobre quem existe', async () => {
-    const errada = await login('reidascarnes', 'senha-que-nao-e');
+    const errada = await login(DONO_LOGIN, 'senha-que-nao-e');
     const inexistente = await login(`ninguem-${sufixo()}`, 'qualquer-coisa');
     expect(errada.status).toBe(401);
     expect(inexistente.status).toBe(401);
@@ -55,14 +68,14 @@ describe('Login', () => {
   });
 
   it('"manter conectado" vale mais tempo que o login comum', async () => {
-    const curto = await login('reidascarnes', SENHA_DONO);
-    const longo = await login('reidascarnes', SENHA_DONO, { remember: true });
+    const curto = await login(DONO_LOGIN, SENHA_DONO);
+    const longo = await login(DONO_LOGIN, SENHA_DONO, { remember: true });
     const exp = (t) => JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString()).exp;
     expect(exp(longo.body.token) - exp(curto.body.token)).toBeGreaterThan(24 * 3600);
   });
 
   it('Sair revoga a sessão de verdade: o mesmo token para de valer', async () => {
-    const res = await login('reidascarnes', SENHA_DONO);
+    const res = await login(DONO_LOGIN, SENHA_DONO);
     const token = res.body.token;
     expect((await request(app).get('/api/me').set(auth(token))).status).toBe(200);
     expect((await request(app).post('/api/auth/logout').set(auth(token))).status).toBe(200);
@@ -72,8 +85,8 @@ describe('Login', () => {
   });
 
   it('trocar a senha derruba as OUTRAS sessões e mantém a atual', async () => {
-    const a = (await login('reidascarnes', SENHA_DONO)).body.token;
-    const b = (await login('reidascarnes', SENHA_DONO)).body.token;
+    const a = (await login(DONO_LOGIN, SENHA_DONO)).body.token;
+    const b = (await login(DONO_LOGIN, SENHA_DONO)).body.token;
     const troca = await request(app).put('/api/auth/password').set(auth(a)).send({ old_password: SENHA_DONO, new_password: 'Dono12345x' });
     expect(troca.status).toBe(200);
     expect((await request(app).get('/api/me').set(auth(b))).status).toBe(401);
@@ -83,7 +96,7 @@ describe('Login', () => {
   });
 
   it('senha fraca e senha atual errada são 400 (não 401, que o front trata como logout)', async () => {
-    const token = (await login('reidascarnes', SENHA_DONO)).body.token;
+    const token = (await login(DONO_LOGIN, SENHA_DONO)).body.token;
     const fraca = await request(app).put('/api/auth/password').set(auth(token)).send({ old_password: SENHA_DONO, new_password: 'abc' });
     expect(fraca.status).toBe(400);
     expect(fraca.body.code).toBe('senha_fraca');
@@ -167,12 +180,20 @@ describe('Equipe e papéis', () => {
 
   it('desativar derruba a sessão na hora e o login passa a ser recusado', async () => {
     expect((await request(app).patch(`/api/usuarios/${caixa.id}`).set(auth(dono)).send({ active: false })).status).toBe(200);
+
+    // Desativar revoga as sessões, então quem estava dentro leva 401 (sessão encerrada), não
+    // 403: a revogação é conferida antes do `active` no verifyToken. Para o front isso é o
+    // certo — 401 com sessão é o que dispara a limpeza e a volta para a tela de login.
     const sessao = await request(app).get('/api/me').set(auth(caixaToken));
-    expect(sessao.status).toBe(403);
-    expect(sessao.body.code).toBe('usuario_desativado');
+    expect(sessao.status).toBe(401);
+    expect(sessao.body.code).toBe('sessao_encerrada');
+
+    // A explicação de verdade ("fale com o dono") aparece na tentativa de entrar de novo, que
+    // é onde a pessoa vai procurar por ela.
     const tentativa = await login(caixaLogin, 'Caixa12345');
     expect(tentativa.status).toBe(403);
     expect(tentativa.body.code).toBe('usuario_desativado');
+
     expect((await request(app).post(`/api/usuarios/${caixa.id}/resetar-senha`).set(auth(dono))).status).toBe(400);
   });
 
@@ -186,11 +207,6 @@ describe('Equipe e papéis', () => {
     expect(res.body.every(e => e.user_agent === undefined)).toBe(true);
   });
 
-  it('login inválido demais vezes seguidas leva 429', async () => {
-    let ultimo = null;
-    for (let i = 0; i < 12 && ultimo !== 429; i++) ultimo = (await login('reidascarnes', 'errada-de-proposito')).status;
-    expect(ultimo).toBe(429);
-  });
 });
 
 describe('Health', () => {

@@ -51,7 +51,9 @@
       return <div style={{ textAlign: 'center', padding: '64px 0' }}><i className="fas fa-spinner fa-spin" style={{ fontSize: 28, color: ACG_ACCENT }}></i></div>;
     }
 
-    function AcgCard({ label, value, icon, color, bg }) {
+    // `hint` é a linha de baixo, para comparação (ex: "12% acima de ontem"). Número sozinho não
+    // diz se o dia foi bom — só ao lado do anterior é que ele significa alguma coisa.
+    function AcgCard({ label, value, icon, color, bg, hint, hintColor }) {
       return (
         <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: '16px 18px' }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, background: bg, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
@@ -59,8 +61,25 @@
           </div>
           <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 2px' }}>{label}</p>
           <p style={{ color: 'var(--bp-text)', fontSize: 20, fontWeight: 800, margin: 0, fontFamily: 'Inter, sans-serif' }}>{value}</p>
+          {hint && <p style={{ color: hintColor || 'var(--bp-text-faint)', fontSize: 11, margin: '4px 0 0', fontWeight: hintColor ? 600 : 400 }}>{hint}</p>}
         </div>
       );
+    }
+
+    // Variação percentual entre dois períodos, já no formato que o card mostra. Sem base
+    // (período anterior zerado) não existe percentual: dizer "+100%" partindo de zero é
+    // inventar número.
+    function acgVariacao(atual, anterior, sufixo) {
+      const a = Number(atual) || 0;
+      const b = Number(anterior) || 0;
+      if (b === 0) return a === 0 ? { texto: `sem movimento ${sufixo}` } : { texto: `nada ${sufixo}` };
+      const pct = ((a - b) / b) * 100;
+      if (Math.abs(pct) < 0.5) return { texto: `igual ${sufixo}` };
+      const sobe = pct > 0;
+      return {
+        texto: `${sobe ? '▲' : '▼'} ${Math.abs(pct).toFixed(0)}% ${sufixo}`,
+        cor: sobe ? '#10b981' : '#ef4444',
+      };
     }
 
     function AcgSectionTitle({ icon, title, subtitle }) {
@@ -133,33 +152,79 @@
     }
 
     /* ---- INÍCIO ---- */
+    const ACG_PAINEL_INTERVALO_MS = 60000;
+
     function AcougueInicio({ showToast, onNavigate }) {
       const [data, setData] = useState(null);
       const [loading, setLoading] = useState(true);
+      const [atualizando, setAtualizando] = useState(false);
 
-      const load = async () => {
-        setLoading(true);
+      // `silencioso` existe por causa da atualização automática: trocar a tela inteira pelo
+      // spinner a cada minuto faria o painel piscar na cara de quem está lendo o número.
+      // Na recarga de fundo os valores só mudam no lugar.
+      const load = async ({ silencioso } = {}) => {
+        if (silencioso) setAtualizando(true); else setLoading(true);
         const res = await apiCall('GET', '/acougue/dashboard');
-        if (res.ok) setData(res.data); else showToast(res.data?.error || 'Erro ao carregar o painel', 'error');
+        if (res.ok) setData(res.data);
+        else if (!silencioso) showToast(res.data?.error || 'Erro ao carregar o painel', 'error');
         setLoading(false);
+        setAtualizando(false);
       };
-      useEffect(() => { load(); }, []);
+
+      useEffect(() => {
+        load();
+        // Três gatilhos, porque um só não cobre o uso real do balcão:
+        //   intervalo — a tela do açougue fica aberta o dia inteiro numa TV ou num canto;
+        //   foco/visibilidade — voltar para a aba depois de horas tem que trazer dado de agora,
+        //     não o de quando ela foi aberta (inclusive depois da virada do dia).
+        const id = setInterval(() => load({ silencioso: true }), ACG_PAINEL_INTERVALO_MS);
+        const aoVoltar = () => { if (!document.hidden) load({ silencioso: true }); };
+        document.addEventListener('visibilitychange', aoVoltar);
+        window.addEventListener('focus', aoVoltar);
+        return () => {
+          clearInterval(id);
+          document.removeEventListener('visibilitychange', aoVoltar);
+          window.removeEventListener('focus', aoVoltar);
+        };
+      }, []);
 
       if (loading || !data) return <AcgSpinner />;
 
+      const mesAnteriorLabel = data.mes_anterior_num ? acgMonthNames[data.mes_anterior_num - 1] : 'mês anterior';
+      const varCaixa = acgVariacao(data.caixa_hoje, data.caixa_ontem, 'que ontem');
+      const varVendas = acgVariacao(data.vendas_hoje, data.vendas_ontem, 'que ontem');
+      const varSaidas = acgVariacao(data.saidas_mes, data.saidas_mes_anterior, `que ${mesAnteriorLabel.toLowerCase()}`);
+
       return (
         <div>
-          <AcgSectionTitle icon="fa-chart-pie" title="Controle Financeiro do Açougue" subtitle="Visão geral do mês corrente" />
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <AcgSectionTitle icon="fa-chart-pie" title="Controle Financeiro do Açougue" subtitle="Visão geral do mês corrente" />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
+              <span style={{ color: 'var(--bp-text-faint)', fontSize: 11.5 }}>
+                {atualizando
+                  ? <span><i className="fas fa-rotate fa-spin" style={{ marginRight: 6 }}></i>atualizando...</span>
+                  : `atualizado ${acgDataHora(data.atualizado_em).slice(-5)}`}
+              </span>
+              <AcgButton type="button" variant="ghost" onClick={() => load({ silencioso: true })} title="Atualizar agora" style={{ padding: '6px 10px', fontSize: 12 }}>
+                <i className="fas fa-rotate-right"></i>
+              </AcgButton>
+            </div>
+          </div>
 
           <AcougueContingencia showToast={showToast} />
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 14, marginBottom: 24 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 14, marginBottom: 24 }}>
+            <AcgCard label="Caixa hoje" value={fmtCur(data.caixa_hoje)} icon="fa-cash-register" color="#10b981" bg="rgba(16,185,129,0.12)"
+              hint={varCaixa.texto} hintColor={varCaixa.cor} />
+            <AcgCard label="Vendas ontem" value={fmtCur(data.caixa_ontem)} icon="fa-clock-rotate-left" color="#a855f7" bg="rgba(168,85,247,0.12)"
+              hint={`${data.vendas_ontem} venda${data.vendas_ontem === 1 ? '' : 's'}`} />
+            <AcgCard label="Vendas hoje" value={data.vendas_hoje} icon="fa-receipt" color={ACG_ACCENT} bg={ACG_ACCENT_BG}
+              hint={varVendas.texto} hintColor={varVendas.cor} />
             <AcgCard label="Entradas do mês" value={fmtCur(data.entradas_mes)} icon="fa-truck-loading" color="#3b82f6" bg="rgba(59,130,246,0.12)" />
-            <AcgCard label="Saídas do mês" value={fmtCur(data.saidas_mes)} icon="fa-drumstick-bite" color="#f59e0b" bg="rgba(245,158,11,0.12)" />
-            <AcgCard label="Caixa hoje" value={fmtCur(data.caixa_hoje)} icon="fa-cash-register" color="#10b981" bg="rgba(16,185,129,0.12)" />
-            <AcgCard label="Vendas hoje" value={data.vendas_hoje} icon="fa-receipt" color={ACG_ACCENT} bg={ACG_ACCENT_BG} />
-            <AcgCard label="PIS/COFINS a recolher" value={fmtCur(data.pis_cofins_a_recolher)} icon="fa-percent" color="#a855f7" bg="rgba(168,85,247,0.12)" />
-            <AcgCard label="Notas pendentes" value={data.notas_pendentes} icon="fa-file-invoice" color="#ef4444" bg="rgba(239,68,68,0.12)" />
+            <AcgCard label="Saídas do mês" value={fmtCur(data.saidas_mes)} icon="fa-drumstick-bite" color="#f59e0b" bg="rgba(245,158,11,0.12)"
+              hint={varSaidas.texto} hintColor={varSaidas.cor} />
+            <AcgCard label={`Saídas de ${mesAnteriorLabel}`} value={fmtCur(data.saidas_mes_anterior)} icon="fa-calendar-check" color="#8b7355" bg="rgba(139,115,85,0.18)"
+              hint="mês fechado" />
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
@@ -3405,9 +3470,8 @@
           <div className={`admin-sidebar-desktop${mobileSidebarOpen ? ' mobile-open' : ''}`}>
             <div style={{ width: w, minWidth: w, height: '100vh', background: 'var(--bp-bg)', borderRight: '1px solid var(--bp-border)', display: 'flex', flexDirection: 'column', transition: 'width .25s', overflow: 'hidden', flexShrink: 0, position: 'sticky', top: 0 }}>
               <div style={{ padding: collapsed ? '18px 8px' : '18px 16px', borderBottom: '1px solid var(--bp-border)', display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 10, minHeight: 64 }}>
-                <div style={{ width: 32, height: 32, borderRadius: 8, background: `linear-gradient(135deg, ${ACG_ACCENT}, ${ACG_ACCENT_DARK})`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <i className="fas fa-drumstick-bite" style={{ color: '#000', fontSize: 14 }}></i>
-                </div>
+                <img src="/img/logo-rei-das-carnes.webp" alt="" width="34" height="34"
+                  style={{ width: 34, height: 34, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
                 {!collapsed && <span className="syne" style={{ fontSize: 15, fontWeight: 700, color: 'var(--bp-text)', whiteSpace: 'nowrap' }}>REI DAS <span style={{ color: ACG_ACCENT }}>CARNES</span></span>}
               </div>
               {!mobileSidebarOpen && (

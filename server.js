@@ -1409,33 +1409,77 @@ async function calcApuracao(month, year) {
   };
 }
 
+// Totais de um mês SEM o custo da apuração fiscal. calcApuracao() chega aos mesmos números, mas
+// para isso carrega item a item para classificar o CST de PIS/COFINS de cada um — caro demais
+// para um painel que se consulta sozinho a cada minuto e que não mostra nada de tributário.
+//
+// As definições seguem calcApuracao() de propósito: saída = venda do caixa + corte vendido
+// direto (atacado); entrada = nota de compra importada por XML + carcaça lançada à mão.
+// Divergir daqui faria o painel e a tela de PIS/COFINS mostrarem números diferentes para o
+// mesmo mês, e aí ninguém sabe em qual acreditar.
+async function totaisDoMes(month, year) {
+  const { start, end } = monthRange(month, year);
+  const { rows: [r] } = await pool.query(
+    `SELECT
+       (SELECT COALESCE(SUM(si.subtotal), 0) FROM acougue_sale_items si
+          JOIN acougue_sales s ON s.id = si.sale_id
+         WHERE s.created_at >= $1 AND s.created_at < $2 AND s.status = 'concluida') AS vendas,
+       (SELECT COALESCE(SUM(total_value), 0) FROM acougue_cuts
+         WHERE output_date >= $1 AND output_date < $2 AND destination = 'venda_direta') AS cortes,
+       (SELECT COALESCE(SUM(valor_total), 0) FROM acougue_purchase_invoices
+         WHERE data_emissao >= $1 AND data_emissao < $2) AS notas,
+       (SELECT COALESCE(SUM(total_value), 0) FROM acougue_carcass_entries
+         WHERE entry_date >= $1 AND entry_date < $2) AS carcacas`,
+    [start, end]
+  );
+  return {
+    entradas: round2(Number(r.notas) + Number(r.carcacas)),
+    saidas: round2(Number(r.vendas) + Number(r.cortes)),
+  };
+}
+
 /* ---- Dashboard ---- */
+// Tudo aqui é recalculado a cada chamada, sem cache: a tela se consulta de novo sozinha a cada
+// minuto, e "hoje", "ontem" e "mês anterior" mudam de significado na virada do dia e do mês.
+// Um valor guardado em memória mostraria o dia errado para quem deixa o painel aberto.
 app.get('/api/acougue/dashboard', ...donoOnly, async (req, res) => {
   try {
     const now = new Date();
-    const apuracao = await calcApuracao(now.getMonth() + 1, now.getFullYear());
-    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const dia = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const ontem = new Date(now);
+    ontem.setDate(ontem.getDate() - 1);
+    // new Date(ano, -1, 1) vira dezembro do ano anterior — o JS normaliza sozinho, então
+    // janeiro não precisa de caso especial.
+    const anterior = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-    const { rows: [{ total: caixaHoje, count: vendasHoje }] } = await pool.query(
-      `SELECT COALESCE(SUM(total_value), 0) as total, COUNT(*)::int as count FROM acougue_sales
-       WHERE created_at >= $1::date AND created_at < $1::date + INTERVAL '1 day' AND status = 'concluida'`,
-      [todayStr]
-    );
-    const { rows: [{ count: notasPendentes }] } = await pool.query(
-      `SELECT COUNT(*)::int as count FROM acougue_invoices WHERE status IN ('rascunho', 'processando')`
-    );
-    const ultimas_entradas = await db.all('SELECT * FROM acougue_carcass_entries ORDER BY entry_date DESC, id DESC LIMIT 5', []);
-    const ultimas_saidas = await db.all('SELECT * FROM acougue_cuts ORDER BY output_date DESC, id DESC LIMIT 5', []);
+    const VENDAS_DO_DIA =
+      `SELECT COALESCE(SUM(total_value), 0) AS total, COUNT(*)::int AS count FROM acougue_sales
+        WHERE created_at >= $1::date AND created_at < $1::date + INTERVAL '1 day' AND status = 'concluida'`;
+
+    const [hoje, diaAnterior, mes, mesAnterior, ultimas_entradas, ultimas_saidas] = await Promise.all([
+      pool.query(VENDAS_DO_DIA, [dia(now)]),
+      pool.query(VENDAS_DO_DIA, [dia(ontem)]),
+      totaisDoMes(now.getMonth() + 1, now.getFullYear()),
+      totaisDoMes(anterior.getMonth() + 1, anterior.getFullYear()),
+      db.all('SELECT * FROM acougue_carcass_entries ORDER BY entry_date DESC, id DESC LIMIT 5', []),
+      db.all('SELECT * FROM acougue_cuts ORDER BY output_date DESC, id DESC LIMIT 5', []),
+    ]);
 
     res.json({
-      entradas_mes: apuracao.entradas_total,
-      saidas_mes: apuracao.saidas_total,
-      caixa_hoje: Number(caixaHoje),
-      vendas_hoje: Number(vendasHoje),
-      notas_pendentes: Number(notasPendentes),
-      pis_cofins_a_recolher: round2(apuracao.pis_due + apuracao.cofins_due),
+      entradas_mes: mes.entradas,
+      saidas_mes: mes.saidas,
+      saidas_mes_anterior: mesAnterior.saidas,
+      mes_anterior_num: anterior.getMonth() + 1,
+      mes_anterior_ano: anterior.getFullYear(),
+      caixa_hoje: Number(hoje.rows[0].total),
+      vendas_hoje: Number(hoje.rows[0].count),
+      caixa_ontem: Number(diaAnterior.rows[0].total),
+      vendas_ontem: Number(diaAnterior.rows[0].count),
       ultimas_entradas,
       ultimas_saidas,
+      // A tela mostra este horário: sem ele não dá para distinguir número de agora de número
+      // de uma aba que ficou aberta desde ontem.
+      atualizado_em: new Date().toISOString(),
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1818,7 +1862,10 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
     // porque "não imprimiu") criava uma nota nova a cada clique para a MESMA venda. Só status
     // 'erro' libera nova tentativa, que é justamente o caso em que reemitir faz sentido.
     const existing = await db.get(
-      "SELECT * FROM acougue_invoices WHERE ref_type = 'venda' AND ref_id = ? AND status IN ('autorizada','processando','rascunho')", [sale.id]);
+      // 'denegada' entra na trava junto com as outras: a SEFAZ denega por irregularidade
+      // fiscal e CONSOME o número da nota. Reemitir para a mesma venda gera outra denegação e
+      // queima mais um número — o caminho é resolver a pendência fiscal, não tentar de novo.
+      "SELECT * FROM acougue_invoices WHERE ref_type = 'venda' AND ref_id = ? AND status IN ('autorizada','processando','rascunho','denegada')", [sale.id]);
     if (existing) {
       return res.status(409).json({
         error: `Esta venda já tem nota ${existing.numero ? `nº ${existing.numero}` : `em ${existing.status}`}.`,

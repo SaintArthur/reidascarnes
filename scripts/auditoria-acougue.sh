@@ -13,8 +13,10 @@ P=$(psql -d reidascarnes -tA -c "SELECT id FROM acougue_products WHERE active=1 
 
 echo "── VENDAS ──"
 check "venda sem itens"            400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d '{"items":[]}')"
-check "quantidade zero"            400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":0}]}")"
-check "quantidade negativa"        400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":-5}]}")"
+B='{"items":[{"product_id":PID,"quantity":0}]}'; B=${B/PID/$P}
+check "quantidade zero"            400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "$B")"
+B='{"items":[{"product_id":PID,"quantity":-5}]}'; B=${B/PID/$P}
+check "quantidade negativa"        400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "$B")"
 check "produto inexistente"        400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d '{"items":[{"product_id":999999,"quantity":1}]}')"
 
 echo "── LEITOR DE BALANÇA ──"
@@ -59,9 +61,12 @@ check "situação da gaveta"         200 "$(st "$API/api/acougue/cash-session" -
 check "histórico de fechamentos"   200 "$(st "$API/api/acougue/cash-session/historico" -H "$H")"
 
 echo "── DESCONTO E PAGAMENTO ──"
-check "desconto negativo"          400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"desconto\":-5}")"
-check "desconto maior que a venda" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"desconto\":999999}")"
-check "pagamentos não somam total" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"pagamentos\":[{\"forma\":\"pix\",\"valor\":1}]}")"
+B='{"items":[{"product_id":PID,"quantity":1}],"desconto":-5}'; B=${B/PID/$P}
+check "desconto negativo"          400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "$B")"
+B='{"items":[{"product_id":PID,"quantity":1}],"desconto":999999}'; B=${B/PID/$P}
+check "desconto maior que a venda" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "$B")"
+B='{"items":[{"product_id":PID,"quantity":1}],"pagamentos":[{"forma":"pix","valor":1}]}'; B=${B/PID/$P}
+check "pagamentos não somam total" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "$B")"
 
 echo "── PRECIFICAÇÃO ──"
 check "carcaça inexistente"        404 "$(st "$API/api/acougue/pricing/carcass/999999" -H "$H")"
@@ -76,11 +81,27 @@ check "extrato inexistente"        404 "$(st "$API/api/acougue/customers/999999/
 check "resumo do fiado"            200 "$(st "$API/api/acougue/receivables/resumo" -H "$H")"
 check "pagar dívida inexistente"   404 "$(st -X POST $API/api/acougue/receivables/999999/pagar -H "$H" -H "$J" -d '{"valor":10}')"
 check "pagar valor zero"           400 "$(st -X POST $API/api/acougue/receivables/1/pagar -H "$H" -H "$J" -d '{"valor":0}')"
-check "fiado sem cliente"          400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"pagamentos\":[{\"forma\":\"credito_loja\",\"valor\":29.99}]}")"
+B='{"items":[{"product_id":PID,"quantity":1}],"pagamentos":[{"forma":"credito_loja","valor":29.99}]}'; B=${B/PID/$P}
+check "fiado sem cliente"          400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "$B")"
 
 echo "── RELATÓRIOS ──"
 check "relatório padrão"           200 "$(st "$API/api/acougue/reports" -H "$H")"
 check "data inicial maior"         400 "$(st "$API/api/acougue/reports?de=2026-12-01&ate=2026-01-01" -H "$H")"
+
+echo "── PRODUÇÃO E LOTES ──"
+check "receita sem produto"        400 "$(st -X POST $API/api/acougue/recipes -H "$H" -H "$J" -d '{"rendimento_kg":10,"itens":[]}')"
+B='{"product_id":PID,"rendimento_kg":10,"itens":[]}'; B=${B/PID/$P}
+check "receita sem insumos"        400 "$(st -X POST $API/api/acougue/recipes -H "$H" -H "$J" -d "$B")"
+B='{"product_id":PID,"rendimento_kg":0,"itens":[{"insumo_id":1,"quantidade":1}]}'; B=${B/PID/$P}
+check "receita com rendimento 0"   400 "$(st -X POST $API/api/acougue/recipes -H "$H" -H "$J" -d "$B")"
+B='{"product_id":PID,"rendimento_kg":10,"itens":[{"insumo_id":PID,"quantidade":1}]}'; B=${B//PID/$P}
+check "receita com o próprio produto" 400 "$(st -X POST $API/api/acougue/recipes -H "$H" -H "$J" -d "$B")"
+B='{"product_id":PID,"quantidade":1}'; B=${B/PID/$P}
+check "produzir sem ficha técnica" 422 "$(st -X POST $API/api/acougue/production -H "$H" -H "$J" -d "$B")"
+B='{"product_id":PID,"quantidade":0}'; B=${B/PID/$P}
+check "produzir quantidade zero"   400 "$(st -X POST $API/api/acougue/production -H "$H" -H "$J" -d "$B")"
+check "listar fichas"              200 "$(st "$API/api/acougue/recipes" -H "$H")"
+check "listar lotes"               200 "$(st "$API/api/acougue/batches" -H "$H")"
 
 echo "── SEGURANÇA ──"
 check "sem token"                  401 "$(st "$API/api/acougue/products")"

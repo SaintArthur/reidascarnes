@@ -24,6 +24,7 @@
         { id: 'precificacao', icon: 'fas fa-money-bill-trend-up', label: 'Precificação' },
         { id: 'saida', icon: 'fas fa-drumstick-bite', label: 'Saída de Cortes' },
         { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos' },
+        { id: 'producao', icon: 'fas fa-industry', label: 'Produção e Lotes' },
         { id: 'conferencia', icon: 'fas fa-clipboard-check', label: 'Conferir Etiquetas' },
         { id: 'caixa', icon: 'fas fa-cash-register', label: 'Caixa' },
         { id: 'clientes', icon: 'fas fa-users', label: 'Clientes e Fiado' },
@@ -1049,6 +1050,161 @@
       frame.contentWindow.focus();
       frame.contentWindow.print();
       setTimeout(() => frame.remove(), 60000);
+    }
+
+    /* ---- PRODUÇÃO E LOTES ---- */
+    // Linguiça, hambúrguer e temperados consomem insumos. Sem registrar, o estoque mente
+    // duas vezes: não baixa o que foi consumido e não sobe o que foi produzido.
+    function AcougueProducao({ showToast }) {
+      const [receitas, setReceitas] = useState([]);
+      const [lotes, setLotes] = useState([]);
+      const [produtos, setProdutos] = useState([]);
+      const [form, setForm] = useState(null);
+      const [prod, setProd] = useState(null);
+
+      const load = async () => {
+        const [r1, r2, r3] = await Promise.all([
+          apiCall('GET', '/acougue/recipes'),
+          apiCall('GET', '/acougue/batches'),
+          apiCall('GET', '/acougue/products'),
+        ]);
+        if (r1.ok) setReceitas(r1.data);
+        if (r2.ok) setLotes(r2.data);
+        if (r3.ok) setProdutos(r3.data);
+      };
+      useEffect(() => { load(); }, []);
+
+      const salvarReceita = async () => {
+        const itens = (form.itens || []).filter(i => i.insumo_id && Number(i.quantidade) > 0);
+        if (!form.product_id || !itens.length || !(Number(form.rendimento_kg) > 0)) {
+          showToast('Preencha produto, rendimento e ao menos um insumo', 'error'); return;
+        }
+        const res = await apiCall('POST', '/acougue/recipes', { ...form, itens });
+        if (res.ok) { showToast('Ficha técnica salva', 'success'); setForm(null); load(); }
+        else showToast(res.data?.error || 'Erro ao salvar', 'error');
+      };
+
+      const produzir = async () => {
+        const res = await apiCall('POST', '/acougue/production', prod);
+        if (res.ok) {
+          showToast(`Lote ${res.data.codigo} produzido — ${fmtCur(res.data.custo_por_kg)}/kg`, 'success');
+          setProd(null); load();
+        } else showToast(res.data?.error || 'Erro ao produzir', 'error');
+      };
+
+      const vencendo = lotes.filter(l => l.situacao === 'vencido' || l.situacao === 'vence_logo');
+
+      return (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+            <AcgSectionTitle icon="fa-industry" title="Produção e Lotes" subtitle="Ficha técnica, custo do que é fabricado e controle de validade" />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <AcgButton variant="ghost" onClick={() => setForm({ product_id: '', rendimento_kg: '', itens: [{ insumo_id: '', quantidade: '' }] })}>Nova ficha técnica</AcgButton>
+              <AcgButton onClick={() => setProd({ product_id: '', quantidade: '', validade: '' })}>Produzir</AcgButton>
+            </div>
+          </div>
+
+          {vencendo.length > 0 && (
+            <div style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 14, padding: 16, marginBottom: 20 }}>
+              <p className="syne" style={{ color: '#ef4444', fontWeight: 700, fontSize: 14, margin: '0 0 4px' }}>
+                <i className="fas fa-clock" style={{ marginRight: 6 }}></i>
+                {vencendo.length} lote(s) vencido(s) ou vencendo em até 3 dias
+              </p>
+              <p style={{ color: 'var(--bp-text-secondary)', fontSize: 12, margin: 0 }}>
+                Produto perecível parado vira perda e risco sanitário. Escoe ou descarte.
+              </p>
+            </div>
+          )}
+
+          {form && (
+            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, marginBottom: 20 }}>
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 12px' }}>Ficha técnica</p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                <AcgSelect label="Produto fabricado" value={form.product_id} onChange={e => setForm({ ...form, product_id: e.target.value })}>
+                  <option value="">selecione...</option>
+                  {produtos.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </AcgSelect>
+                <AcgInput label="Rendimento (kg por receita)" type="number" step="0.001" min="0" value={form.rendimento_kg}
+                  onChange={e => setForm({ ...form, rendimento_kg: e.target.value })} hint="quanto sai a cada batida" />
+              </div>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, margin: '4px 0 8px' }}>Insumos consumidos</p>
+              {(form.itens || []).map((it, idx) => (
+                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr auto', gap: 10, alignItems: 'end', marginBottom: 6 }}>
+                  <AcgSelect label="" value={it.insumo_id} onChange={e => {
+                    const itens = [...form.itens]; itens[idx] = { ...it, insumo_id: e.target.value }; setForm({ ...form, itens });
+                  }}>
+                    <option value="">insumo...</option>
+                    {produtos.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </AcgSelect>
+                  <AcgInput label="" type="number" step="0.001" min="0" placeholder="qtd" value={it.quantidade} onChange={e => {
+                    const itens = [...form.itens]; itens[idx] = { ...it, quantidade: e.target.value }; setForm({ ...form, itens });
+                  }} />
+                  <button onClick={() => setForm({ ...form, itens: form.itens.filter((_, i) => i !== idx) })}
+                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', marginBottom: 12 }}>remover</button>
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
+                <AcgButton variant="ghost" onClick={() => setForm({ ...form, itens: [...(form.itens || []), { insumo_id: '', quantidade: '' }] })}>+ insumo</AcgButton>
+                <AcgButton onClick={salvarReceita}>Salvar ficha</AcgButton>
+                <AcgButton variant="ghost" onClick={() => setForm(null)}>Cancelar</AcgButton>
+              </div>
+            </div>
+          )}
+
+          {prod && (
+            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, marginBottom: 20 }}>
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 12px' }}>Produzir</p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
+                <AcgSelect label="Produto" value={prod.product_id} onChange={e => setProd({ ...prod, product_id: e.target.value })}>
+                  <option value="">selecione...</option>
+                  {receitas.map(r => <option key={r.product_id} value={r.product_id}>{r.produto}</option>)}
+                </AcgSelect>
+                <AcgInput label="Quantidade (kg)" type="number" step="0.001" min="0" value={prod.quantidade} onChange={e => setProd({ ...prod, quantidade: e.target.value })} />
+                <AcgInput label="Validade" type="date" value={prod.validade} onChange={e => setProd({ ...prod, validade: e.target.value })} />
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <AcgButton onClick={produzir} disabled={!prod.product_id || !(Number(prod.quantidade) > 0)}>Confirmar produção</AcgButton>
+                <AcgButton variant="ghost" onClick={() => setProd(null)}>Cancelar</AcgButton>
+              </div>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '8px 0 0' }}>
+                Os insumos da ficha são baixados do estoque na proporção da quantidade produzida.
+              </p>
+            </div>
+          )}
+
+          <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 10px' }}>Fichas técnicas</p>
+          <AcgTable
+            emptyLabel="Nenhuma ficha cadastrada"
+            columns={[
+              { key: 'produto', label: 'Produto' },
+              { key: 'rendimento_kg', label: 'Rende', align: 'right', render: r => `${r.rendimento_kg} kg` },
+              { key: 'itens', label: 'Insumos', render: r => r.itens.map(i => `${i.quantidade} ${i.unit} ${i.insumo}`).join(' + ') },
+              { key: 'custo_por_kg', label: 'Custo/kg', align: 'right', render: r => r.custo_por_kg != null
+                ? fmtCur(r.custo_por_kg)
+                : <span style={{ color: '#f59e0b', fontSize: 11 }} title="insumo sem custo cadastrado">sem custo</span> },
+            ]}
+            rows={receitas}
+          />
+
+          <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '20px 0 10px' }}>Lotes em estoque</p>
+          <AcgTable
+            emptyLabel="Nenhum lote produzido"
+            columns={[
+              { key: 'codigo', label: 'Lote' },
+              { key: 'produto', label: 'Produto' },
+              { key: 'quantidade_restante', label: 'Resta', align: 'right', render: r => `${Number(r.quantidade_restante).toFixed(3)} ${r.unit}` },
+              { key: 'custo_por_kg', label: 'Custo/kg', align: 'right', render: r => r.custo_por_kg != null ? fmtCur(r.custo_por_kg) : '—' },
+              { key: 'validade', label: 'Validade', render: r => r.validade ? fmtDate(r.validade) : '—' },
+              { key: 'situacao', label: '', render: r => {
+                const cor = { vencido: '#ef4444', vence_logo: '#f59e0b', ok: '#10b981', sem_validade: 'var(--bp-text-faint)' }[r.situacao];
+                const txt = { vencido: 'VENCIDO', vence_logo: `vence em ${r.dias_para_vencer}d`, ok: `${r.dias_para_vencer}d`, sem_validade: 'sem validade' }[r.situacao];
+                return <span style={{ color: cor, fontSize: 12, fontWeight: r.situacao === 'vencido' ? 700 : 400 }}>{txt}</span>;
+              } },
+            ]}
+            rows={lotes}
+          />
+        </div>
+      );
     }
 
     /* ---- RELATÓRIOS DE GESTÃO ---- */
@@ -2963,6 +3119,7 @@
                 : activeView === 'precificacao' ? <AcouguePrecificacao showToast={showToast} />
                 : activeView === 'saida' ? <AcougueSaida showToast={showToast} />
                 : activeView === 'produtos' ? <AcougueProdutos showToast={showToast} />
+                : activeView === 'producao' ? <AcougueProducao showToast={showToast} />
                 : activeView === 'conferencia' ? <AcougueConferencia showToast={showToast} />
                 : activeView === 'caixa' ? <AcougueCaixa showToast={showToast} />
                 : activeView === 'clientes' ? <AcougueClientes showToast={showToast} />

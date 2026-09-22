@@ -527,6 +527,44 @@ async function initDatabase() {
     cofins_valor REAL DEFAULT 0
   )`);
 
+  // ─── Produção: ficha técnica, lote e validade ──────────────────────────────
+  // Linguiça, hambúrguer, carne temperada e kits consomem insumos. Sem registrar isso, o
+  // estoque mente duas vezes: não baixa o que foi consumido e não sobe o que foi produzido —
+  // e ninguém sabe o custo real do que fabrica.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_recipes (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES acougue_products(id) ON DELETE CASCADE,
+    -- Rendimento da receita: quanto sai de produto final a cada "batida". Serve de base
+    -- para escalar os insumos quando se produz uma quantidade diferente.
+    rendimento_kg REAL NOT NULL DEFAULT 1,
+    observacao TEXT,
+    ativo INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_recipe_produto ON acougue_recipes(product_id) WHERE ativo = 1');
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_recipe_items (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    recipe_id INTEGER NOT NULL REFERENCES acougue_recipes(id) ON DELETE CASCADE,
+    insumo_id INTEGER NOT NULL REFERENCES acougue_products(id) ON DELETE RESTRICT,
+    quantidade REAL NOT NULL
+  )`);
+
+  // Cada produção vira um lote, com validade. É o que permite rastrear e avisar vencimento —
+  // produto perecível sem isso gera perda e risco sanitário.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_batches (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES acougue_products(id) ON DELETE CASCADE,
+    codigo TEXT NOT NULL,
+    quantidade REAL NOT NULL,
+    quantidade_restante REAL NOT NULL,
+    custo_total REAL DEFAULT 0,
+    validade DATE,
+    produzido_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by INTEGER REFERENCES users(id)
+  )`);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_batches_validade ON acougue_batches(validade) WHERE quantidade_restante > 0');
+
   // ─── Clientes e fiado (caderneta) ──────────────────────────────────────────
   // Açougue de bairro vende fiado. Sem isso o sistema não substitui o caderno, e é no
   // caderno que o dinheiro se perde: ninguém lembra quem deve o quê nem desde quando.
@@ -3422,6 +3460,141 @@ app.post('/api/acougue/products/:id/conferir-plu', ...acougueOnly, async (req, r
       [confere ? 1 : 0, observacao || null, req.user.id, req.params.id]);
 
     res.json(await db.get('SELECT id, name, scale_code, plu_confere, plu_observacao FROM acougue_products WHERE id = ?', [req.params.id]));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Produção: ficha técnica e lotes ---- */
+app.get('/api/acougue/recipes', ...acougueOnly, async (req, res) => {
+  try {
+    const receitas = await db.all(
+      `SELECT r.*, p.name AS produto, p.unit FROM acougue_recipes r
+       JOIN acougue_products p ON p.id = r.product_id WHERE r.ativo = 1 ORDER BY p.name`, []);
+    for (const r of receitas) {
+      r.itens = await db.all(
+        `SELECT i.*, p.name AS insumo, p.unit, COALESCE(p.cost_price, 0) AS custo_unit
+         FROM acougue_recipe_items i JOIN acougue_products p ON p.id = i.insumo_id
+         WHERE i.recipe_id = ?`, [r.id]);
+      // Custo da receita depende do custo dos insumos; sem custo cadastrado o número seria
+      // falso, então sinalizamos em vez de somar zero silenciosamente.
+      r.insumos_sem_custo = r.itens.filter(i => !Number(i.custo_unit)).length;
+      r.custo_estimado = r.insumos_sem_custo ? null
+        : round2(r.itens.reduce((s, i) => s + i.quantidade * Number(i.custo_unit), 0));
+      r.custo_por_kg = (r.custo_estimado != null && r.rendimento_kg > 0)
+        ? round2(r.custo_estimado / r.rendimento_kg) : null;
+    }
+    res.json(receitas);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/acougue/recipes', ...acougueOnly, async (req, res) => {
+  const { product_id, rendimento_kg, itens, observacao } = req.body || {};
+  if (!product_id) return res.status(400).json({ error: 'Informe o produto fabricado.' });
+  if (!Array.isArray(itens) || !itens.length) return res.status(400).json({ error: 'Informe ao menos um insumo.' });
+  if (!(Number(rendimento_kg) > 0)) return res.status(400).json({ error: 'Informe quanto a receita rende.' });
+  if (itens.some(i => Number(i.insumo_id) === Number(product_id))) {
+    return res.status(400).json({ error: 'A receita não pode ter o próprio produto como insumo.' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Substitui a receita anterior em vez de acumular: ficha técnica duplicada faz a
+    // produção consumir insumo duas vezes.
+    await client.query('UPDATE acougue_recipes SET ativo = 0 WHERE product_id = $1', [product_id]);
+    const { rows: [r] } = await client.query(
+      'INSERT INTO acougue_recipes (product_id, rendimento_kg, observacao) VALUES ($1,$2,$3) RETURNING id',
+      [product_id, Number(rendimento_kg), observacao || null]);
+    for (const i of itens) {
+      if (!(Number(i.quantidade) > 0)) throw Object.assign(new Error('Quantidade de insumo inválida.'), { code: 'BAD_INPUT' });
+      await client.query('INSERT INTO acougue_recipe_items (recipe_id, insumo_id, quantidade) VALUES ($1,$2,$3)',
+        [r.id, i.insumo_id, Number(i.quantidade)]);
+    }
+    await client.query('COMMIT');
+    res.status(201).json({ id: r.id });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === 'BAD_INPUT') return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Produzir: consome os insumos, cria o lote e sobe o estoque do produto final.
+app.post('/api/acougue/production', ...acougueOnly, async (req, res) => {
+  const { product_id, quantidade, validade } = req.body || {};
+  if (!product_id || !(Number(quantidade) > 0)) {
+    return res.status(400).json({ error: 'Informe o produto e a quantidade produzida.' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [receita] } = await client.query(
+      'SELECT * FROM acougue_recipes WHERE product_id = $1 AND ativo = 1', [product_id]);
+    if (!receita) { await client.query('ROLLBACK'); return res.status(422).json({ error: 'Este produto não tem ficha técnica cadastrada.' }); }
+
+    const { rows: itens } = await client.query(
+      `SELECT i.*, p.name, p.stock_qty, COALESCE(p.cost_price,0) AS custo_unit
+       FROM acougue_recipe_items i JOIN acougue_products p ON p.id = i.insumo_id WHERE i.recipe_id = $1`, [receita.id]);
+
+    // Escala os insumos pela produção pedida em relação ao rendimento da receita.
+    const fator = Number(quantidade) / Number(receita.rendimento_kg);
+    let custoTotal = 0;
+    const faltando = [];
+    for (const i of itens) {
+      const necessario = round3(i.quantidade * fator);
+      if (Number(i.stock_qty) < necessario) faltando.push(`${i.name} (precisa ${necessario}, tem ${round3(i.stock_qty)})`);
+      custoTotal += necessario * Number(i.custo_unit);
+    }
+    // Produzir sem insumo deixaria o estoque negativo e escondido. Melhor barrar e dizer o
+    // que falta — o operador resolve na hora, não no inventário do mês.
+    if (faltando.length) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: `Estoque insuficiente: ${faltando.join('; ')}`, faltando });
+    }
+
+    for (const i of itens) {
+      const necessario = round3(i.quantidade * fator);
+      await client.query('UPDATE acougue_products SET stock_qty = stock_qty - $1 WHERE id = $2', [necessario, i.insumo_id]);
+      await registrarMovimento(client, {
+        productId: i.insumo_id, tipo: 'producao_consumo', quantidade: -necessario,
+        motivo: `Consumido na produção`, refType: 'producao', refId: product_id, userId: req.user.id });
+    }
+
+    const { rows: [{ count }] } = await client.query('SELECT COUNT(*)::int AS count FROM acougue_batches');
+    const codigo = `L${String(count + 1).padStart(5, '0')}`;
+    const { rows: [lote] } = await client.query(
+      `INSERT INTO acougue_batches (product_id, codigo, quantidade, quantidade_restante, custo_total, validade, created_by)
+       VALUES ($1,$2,$3,$3,$4,$5,$6) RETURNING *`,
+      [product_id, codigo, Number(quantidade), round2(custoTotal), validade || null, req.user.id]);
+
+    await client.query('UPDATE acougue_products SET stock_qty = stock_qty + $1 WHERE id = $2', [Number(quantidade), product_id]);
+    await registrarMovimento(client, {
+      productId: product_id, tipo: 'producao', quantidade: Number(quantidade),
+      motivo: `Produção lote ${codigo}`, refType: 'lote', refId: lote.id, userId: req.user.id });
+
+    await client.query('COMMIT');
+    res.status(201).json({ ...lote, custo_por_kg: round2(custoTotal / Number(quantidade)) });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Lotes com validade: o que vence primeiro aparece primeiro.
+app.get('/api/acougue/batches', ...acougueOnly, async (req, res) => {
+  try {
+    const lotes = await db.all(
+      `SELECT b.*, p.name AS produto, p.unit FROM acougue_batches b
+       JOIN acougue_products p ON p.id = b.product_id
+       WHERE b.quantidade_restante > 0 ORDER BY b.validade NULLS LAST, b.produzido_em LIMIT 200`, []);
+    const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+    res.json(lotes.map(l => {
+      const dias = l.validade ? Math.ceil((new Date(l.validade) - hoje) / 86400000) : null;
+      return {
+        ...l,
+        dias_para_vencer: dias,
+        situacao: dias == null ? 'sem_validade' : (dias < 0 ? 'vencido' : (dias <= 3 ? 'vence_logo' : 'ok')),
+        custo_por_kg: l.quantidade > 0 ? round2(l.custo_total / l.quantidade) : null,
+      };
+    }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

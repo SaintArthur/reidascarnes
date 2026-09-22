@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BarberPro v2.1 — Sistema Profissional de Barbearia</title>
+  <title>Rei das Carnes — Sistema de Gestão do Açougue</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -1593,7 +1593,7 @@
         return;
       }
 
-      var files = ['js/i18n.jsx', 'js/utils.jsx', 'js/login.jsx', 'js/client.jsx', 'js/admin.jsx', 'js/barber.jsx', 'js/acougue.jsx', 'js/app.jsx'];
+      var files = ['js/utils.jsx', 'js/login.jsx', 'js/acougue.jsx', 'js/app.jsx'];
       Promise.all(files.map(f => fetch(f).then(r => {
         if (!r.ok) throw new Error('Falha ao carregar ' + f);
         return r.text();

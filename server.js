@@ -3,7 +3,7 @@ const { Pool, types } = require('pg');
 // node-pg devolve BIGINT (COUNT(*), SUM de coluna inteira) como string por padrão, para não
 // perder precisão em valores acima de Number.MAX_SAFE_INTEGER. O sqlite3 sempre devolvia number
 // nesses casos, e o resto do código (aqui e no front-end) assume number (ex: `prev === 0`,
-// `referralCount === 1`) — sem essa conversão, essas comparações estritas quebrariam em produção.
+// comparações estritas como `prev === 0`) — sem essa conversão elas quebrariam em produção.
 types.setTypeParser(20, (val) => parseInt(val, 10));
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { Signer } = require('@aws-sdk/rds-signer');
@@ -25,7 +25,7 @@ const precificacao = require('./precificacao');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'chave-secreta-barberpro-2025-mude-em-producao';
+const JWT_SECRET = process.env.JWT_SECRET || 'defina-JWT_SECRET-no-env-antes-de-produzir';
 const pkg = require('./package.json');
 const serverStartedAt = new Date();
 
@@ -59,7 +59,7 @@ if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
     console.warn('⚠️  Não foi possível persistir as chaves VAPID em .env:', e.message);
   }
 }
-webpush.setVapidDetails('mailto:contato@barberpro.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+webpush.setVapidDetails('mailto:contato@reidascarnes.com.br', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
@@ -80,7 +80,7 @@ const pool = process.env.DB_HOST
       host: process.env.DB_HOST,
       port: Number(process.env.DB_PORT || 5432),
       user: process.env.DB_USER || 'postgres',
-      database: process.env.DB_NAME || 'barberpro',
+      database: process.env.DB_NAME || 'reidascarnes',
       password: () => new Signer({
         hostname: process.env.DB_HOST,
         port: Number(process.env.DB_PORT || 5432),
@@ -94,7 +94,7 @@ const pool = process.env.DB_HOST
       ssl: true,
     })
   : new Pool({
-      connectionString: process.env.DATABASE_URL || `postgres://localhost/${process.env.PGDATABASE || 'barberpro'}`,
+      connectionString: process.env.DATABASE_URL || `postgres://localhost/${process.env.PGDATABASE || 'reidascarnes'}`,
       ssl: /rds\.amazonaws\.com/.test(process.env.DATABASE_URL || '') ? true : false,
     });
 pool.on('error', (err) => console.error('Erro inesperado no pool do Postgres:', err.message));
@@ -182,121 +182,16 @@ async function initDatabase() {
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS services (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    price REAL NOT NULL,
-    duration INTEGER NOT NULL,
-    category TEXT,
-    icon TEXT,
-    active INTEGER DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS appointments (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    client_id INTEGER NOT NULL REFERENCES users(id),
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    service_id INTEGER NOT NULL REFERENCES services(id),
-    appointment_date DATE NOT NULL,
-    appointment_time TIME NOT NULL,
-    status TEXT DEFAULT 'pending',
-    notes TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    appointment_id INTEGER NOT NULL REFERENCES appointments(id),
-    amount REAL NOT NULL,
-    method TEXT,
-    status TEXT DEFAULT 'pending',
-    receipt_url TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    endpoint TEXT NOT NULL UNIQUE,
-    p256dh TEXT NOT NULL,
-    auth TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS reviews (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    appointment_id INTEGER NOT NULL REFERENCES appointments(id),
-    client_id INTEGER NOT NULL REFERENCES users(id),
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    rating REAL NOT NULL,
-    comment TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS working_hours (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    day_of_week INTEGER,
-    start_time TIME NOT NULL,
-    end_time TIME NOT NULL,
-    break_start TIME,
-    break_end TIME
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS promotions (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    code TEXT UNIQUE NOT NULL,
-    discount_type TEXT,
-    discount_value REAL NOT NULL,
-    valid_until TIMESTAMP,
-    max_uses INTEGER,
-    uses_count INTEGER DEFAULT 0,
-    active INTEGER DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS waitlist (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    client_id INTEGER NOT NULL REFERENCES users(id),
-    service_id INTEGER NOT NULL REFERENCES services(id),
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    preferred_date DATE,
-    position INTEGER,
-    notified INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS blocked_times (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    date DATE NOT NULL,
-    start_time TIME NOT NULL,
-    end_time TIME NOT NULL,
-    reason TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS absences (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    start_date DATE NOT NULL,
-    end_date DATE NOT NULL,
-    reason TEXT,
-    status TEXT DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    reviewed_at TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS dayoff_requests (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    barber_id INTEGER NOT NULL REFERENCES users(id),
-    day_of_week INTEGER NOT NULL,
-    status TEXT DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    reviewed_at TIMESTAMP
-  )`);
 
   await pool.query(`CREATE TABLE IF NOT EXISTS settings (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -304,26 +199,12 @@ async function initDatabase() {
     value TEXT NOT NULL
   )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS notifications (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    title TEXT NOT NULL,
-    message TEXT NOT NULL,
-    type TEXT DEFAULT 'info',
-    read INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS referrals (
-    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    referrer_id INTEGER NOT NULL REFERENCES users(id),
-    referred_id INTEGER NOT NULL REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )`);
 
   // ─── Módulo Açougue (role 'acougue') ────────────────────────────────────────
-  // Dashboard financeiro separado do fluxo de barbearia — tabelas próprias, sem FK pra
-  // appointments/services. Reaproveita apenas users (dono/operador do caixa) e settings
+  // Tabelas do açougue. Nomeadas com prefixo `acougue_` desde a origem, quando o módulo
+  // ainda convivia com outro sistema; os nomes ficaram para não quebrar dados já gravados.
+  // Só as tabelas do açougue, mais users (dono/operador do caixa) e settings.
   // (config fiscal: CNPJ, IE, alíquotas de PIS/COFINS).
 
   await pool.query(`CREATE TABLE IF NOT EXISTS acougue_products (
@@ -696,105 +577,11 @@ async function initDatabase() {
 
   // Migrações (colunas adicionadas depois do schema inicial) — idempotentes via IF NOT EXISTS,
   // sem precisar do try/catch de "duplicate column" que o sqlite3 exigia.
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS specialty TEXT');
-  for (const col of ['featured INTEGER DEFAULT 0', 'hidden INTEGER DEFAULT 0', 'reply TEXT', 'reply_at TIMESTAMP']) {
-    await pool.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS ${col}`);
-  }
-  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_appointment ON reviews(appointment_id)');
-
-  // Garante, a nível de banco, que não existam dois agendamentos ativos no mesmo horário/barbeiro
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_appointment
-    ON appointments(barber_id, appointment_date, appointment_time)
-    WHERE status IN ('pending', 'confirmed')`);
-
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'dark'");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'pt-BR'");
-  await pool.query('ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMP');
-  await pool.query('ALTER TABLE appointments ADD COLUMN IF NOT EXISTS price REAL');
-  await pool.query(`UPDATE appointments SET price = (SELECT price FROM services WHERE services.id = appointments.service_id) WHERE price IS NULL`);
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date TEXT');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS service_preferences TEXT');
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password INTEGER DEFAULT 0');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_photos TEXT');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS intro_video_url TEXT');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS instagram TEXT');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_birthday_notif_year INTEGER');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT');
-  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code) WHERE referral_code IS NOT NULL');
-  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by INTEGER');
-
-  // Índice único de working_hours criado antes do seed abaixo — banco novo, sem linhas
-  // duplicadas legadas para migrar (diferente do SQLite, que só ganhou essa constraint depois
-  // de já ter acumulado duplicatas em restarts anteriores).
-  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_working_hours ON working_hours(barber_id, day_of_week)');
 
   // Seed inicial - só insere se não existir
-  const adminPassword = bcrypt.hashSync('Admin@2025', 10);
-  await pool.query(
-    `INSERT INTO users (name, email, phone, password, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (email) DO NOTHING`,
-    ['Admin', 'admin@barbearia.com', '(31) 99999-9999', adminPassword, 'admin']
-  );
-
-  const barberPassword = bcrypt.hashSync('Barber@2025', 10);
-  await pool.query(
-    `INSERT INTO users (name, email, phone, password, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (email) DO NOTHING`,
-    ['João da Silva', 'joao@barbearia.com', '(31) 98765-4321', barberPassword, 'barber']
-  );
-  await pool.query(
-    `INSERT INTO users (name, email, phone, password, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (email) DO NOTHING`,
-    ['Carlos Santos', 'carlos@barbearia.com', '(31) 98765-4322', barberPassword, 'barber']
-  );
-
-  const services = [
-    ['Corte de Cabelo', 'Corte completo com acabamento', 35.00, 30, 'corte'],
-    ['Barba Completa', 'Corte e desenho de barba', 25.00, 25, 'barba'],
-    ['Corte + Barba', 'Corte de cabelo + barba', 55.00, 50, 'combo'],
-    ['Hidratação', 'Tratamento de hidratação', 45.00, 40, 'tratamento'],
-    ['Sobrancelha', 'Design de sobrancelha', 15.00, 15, 'acabamento'],
-    ['Pezinho', 'Aparação lateral', 20.00, 20, 'acabamento'],
-    ['Pigmentação', 'Tingimento de barba', 35.00, 30, 'pigmentacao'],
-    ['Limpeza de Pele', 'Facial masculino', 50.00, 45, 'facial'],
-  ];
-  const { rows: [countRow] } = await pool.query('SELECT COUNT(*) as count FROM services');
-  if (Number(countRow.count) === 0) {
-    for (const s of services) {
-      await pool.query(`INSERT INTO services (name, description, price, duration, category) VALUES ($1, $2, $3, $4, $5)`, s);
-    }
-  }
-
-  for (const day of [1, 2, 3, 4, 5, 6]) {
-    const endTime = day === 6 ? '17:00' : '18:00';
-    await pool.query(
-      `INSERT INTO working_hours (barber_id, day_of_week, start_time, end_time, break_start, break_end) VALUES (2, $1, '09:00', $2, '12:00', '13:00') ON CONFLICT (barber_id, day_of_week) DO NOTHING`,
-      [day, endTime]
-    );
-    await pool.query(
-      `INSERT INTO working_hours (barber_id, day_of_week, start_time, end_time, break_start, break_end) VALUES (3, $1, '09:00', $2, '12:00', '13:00') ON CONFLICT (barber_id, day_of_week) DO NOTHING`,
-      [day, endTime]
-    );
-  }
-
-  // Backfill: barbeiros sem nenhum horário cadastrado (ex: criados pelo admin sem configurar
-  // escala) ficavam com 0 horários disponíveis em qualquer data.
-  const { rows: barbersNoSchedule } = await pool.query(
-    `SELECT id FROM users WHERE role = 'barber' AND id NOT IN (SELECT DISTINCT barber_id FROM working_hours)`
-  );
-  for (const b of barbersNoSchedule) await seedDefaultSchedule(b.id);
-
-  const settingsSeed = [
-    ['business_name', 'BarberPro Premium'],
-    ['business_phone', '(31) 3333-4444'],
-    ['business_email', 'contato@barbearia.com'],
-    ['business_address', 'Rua das Flores, 123'],
-    ['opening_hours', 'Seg-Sexta: 09:00-18:00, Sábado: 09:00-17:00'],
-    ['cancel_fee', '20'],
-  ];
-  for (const [key, value] of settingsSeed) {
-    await pool.query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [key, value]);
-  }
-
   // Usuário do módulo açougue (login: reidascarnes / senha: reidascarnes). O campo `email` do
   // login aceita qualquer string única — não precisa ter formato de e-mail real.
   const acougueOwnerPassword = bcrypt.hashSync('reidascarnes', 10);
@@ -893,17 +680,6 @@ async function initDatabase() {
   }
 }
 
-// Aplica a escala padrão da barbearia (Seg-Sáb, 09:00-18:00/17:00, intervalo 12:00-13:00) a um
-// barbeiro que ainda não tem nenhum horário próprio configurado.
-async function seedDefaultSchedule(barberId) {
-  for (const day of [1, 2, 3, 4, 5, 6]) {
-    const endTime = day === 6 ? '17:00' : '18:00';
-    await pool.query(
-      `INSERT INTO working_hours (barber_id, day_of_week, start_time, end_time, break_start, break_end) VALUES ($1, $2, '09:00', $3, '12:00', '13:00') ON CONFLICT (barber_id, day_of_week) DO NOTHING`,
-      [barberId, day, endTime]
-    );
-  }
-}
 
 // ─── Middlewares de autenticação ────────────────────────────────────────────
 
@@ -956,70 +732,6 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
   });
 });
 
-app.post('/api/auth/register', (req, res) => {
-  const { name, email, phone, password, document, referral_code } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
-  }
-  const normalizedEmail = email.trim().toLowerCase();
-  const phoneDigits = phone ? phone.replace(/\D/g, '') : null;
-
-  // Vincula a indicação (se o código enviado corresponder a alguém) depois que o
-  // novo usuário já existe, notifica os dois lados no idioma de cada um, e só então
-  // responde — código inválido/inexistente é ignorado silenciosamente, sem erro.
-  const linkReferralAndRespond = (newUserId, respond) => {
-    if (!referral_code) return respond();
-    db.get('SELECT id FROM users WHERE referral_code = ?', [referral_code], (err, referrer) => {
-      if (err || !referrer || referrer.id === newUserId) return respond();
-      db.run('UPDATE users SET referred_by = ? WHERE id = ?', [referrer.id, newUserId]);
-      isSettingEnabled('referral_enabled', (enabled) => {
-        if (!enabled) return respond();
-        db.run('INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)', [referrer.id, newUserId]);
-        db.all(`SELECT key, value FROM settings WHERE key IN ('referral_bonus_referrer', 'referral_bonus_referred')`, (settingsErr, rows) => {
-          const s = {};
-          (rows || []).forEach(r => { s[r.key] = r.value; });
-          criarNotificacao(referrer.id, 'Indicação recompensada!', 'Alguém se cadastrou pelo seu link de indicação! Você ganhou: {bonus}.', 'success', { bonus: s.referral_bonus_referrer || '' });
-          criarNotificacao(newUserId, 'Bem-vindo(a)!', 'Você ganhou {bonus} por se cadastrar através de uma indicação.', 'success', { bonus: s.referral_bonus_referred || '' });
-          respond();
-        });
-      });
-    });
-  };
-
-  const insertUser = () => {
-    const hashedPassword = bcrypt.hashSync(password, 10);
-    // Toda conta nova começa em pt-BR por padrão, independente do X-Lang que a
-    // tela de cadastro estava mostrando — o idioma só muda quando a pessoa
-    // escolhe explicitamente no dropdown do header (e aí fica fixo).
-    const language = 'pt-BR';
-    db.run(
-      'INSERT INTO users (name, email, phone, password, document, role, language) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [name, normalizedEmail, phone, hashedPassword, document || null, 'client', language],
-      function(err) {
-        if (err) {
-          if (err.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'Email já cadastrado') });
-          return res.status(500).json({ error: t(reqLang(req), 'Erro ao registrar') });
-        }
-        const newUserId = this.lastID;
-        const token = jwt.sign({ id: newUserId, email: normalizedEmail, role: 'client', name, language }, JWT_SECRET, { expiresIn: '7d' });
-        linkReferralAndRespond(newUserId, () => {
-          res.status(201).json({ token, user: { id: newUserId, name, email: normalizedEmail, role: 'client', phone, theme: 'dark', language } });
-        });
-      }
-    );
-  };
-
-  if (!phoneDigits) return insertUser();
-
-  db.get(
-    `SELECT id FROM users WHERE phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'(',''),')',''),'-',''),' ','') = ?`,
-    [phoneDigits],
-    (err, existing) => {
-      if (existing) return res.status(409).json({ error: t(reqLang(req), 'Telefone já cadastrado') });
-      insertUser();
-    }
-  );
-});
 
 app.post('/api/auth/reset-password', (req, res) => {
   const { email, newPassword } = req.body;
@@ -1105,1041 +817,94 @@ app.put('/api/auth/password', verifyToken, (req, res) => {
 
 // ─── Serviços ─────────────────────────────────────────────────────────────────
 
-app.get('/api/services', (req, res) => {
-  db.all('SELECT * FROM services WHERE active = 1', (err, services) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(services);
-  });
-});
 
-app.post('/api/services', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { name, description, price, duration, category } = req.body;
-  db.run(
-    'INSERT INTO services (name, description, price, duration, category) VALUES (?, ?, ?, ?, ?)',
-    [name, description, price, duration, category],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, name, description, price, duration, category });
-    }
-  );
-});
 
-app.put('/api/services/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { name, description, price, duration, category, active } = req.body;
-  db.run(
-    'UPDATE services SET name=?, description=?, price=?, duration=?, category=?, active=? WHERE id=?',
-    [name, description, price, duration, category, active !== undefined ? active : 1, req.params.id],
-    (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: req.params.id, name, description, price, duration, category });
-    }
-  );
-});
 
-app.delete('/api/services/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.run('UPDATE services SET active = 0 WHERE id = ?', [req.params.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ id: req.params.id, active: 0 });
-  });
-});
 
 // ─── Agendamentos ─────────────────────────────────────────────────────────────
 
-app.post('/api/appointments', verifyToken, (req, res) => {
-  const { service_id, barber_id, appointment_date, appointment_time, notes } = req.body;
-  const client_id = req.user.id;
 
-  if (!service_id || !barber_id || !appointment_date || !appointment_time) {
-    return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
-  }
 
-  const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
-  if (appointment_date < todayStr) {
-    return res.status(400).json({ error: t(reqLang(req), 'Não é possível agendar em uma data que já passou') });
-  }
-  if (appointment_date === todayStr) {
-    const [h, m] = appointment_time.split(':').map(Number);
-    const slot = new Date(now); slot.setHours(h, m, 0, 0);
-    if (slot < now) return res.status(400).json({ error: t(reqLang(req), 'Não é possível agendar em um horário que já passou') });
-  }
 
-  const toMinutes = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
 
-  db.get('SELECT id, name, duration, price FROM services WHERE id = ? AND active = 1', [service_id], (err, service) => {
-    if (!service) return res.status(400).json({ error: t(reqLang(req), 'Serviço inválido') });
 
-    db.get('SELECT id FROM users WHERE id = ? AND role = ?', [barber_id, 'barber'], (err, barber) => {
-      if (!barber) return res.status(400).json({ error: t(reqLang(req), 'Barbeiro inválido') });
-
-      db.all(
-        `SELECT a.appointment_time, s.duration FROM appointments a JOIN services s ON a.service_id = s.id
-         WHERE a.barber_id = ? AND a.appointment_date = ? AND a.status IN ('pending', 'confirmed')`,
-        [barber_id, appointment_date],
-        (err, existing) => {
-          const newStart = toMinutes(appointment_time);
-          const newEnd = newStart + (service.duration || 30);
-          const conflict = (existing || []).some(row => {
-            const existStart = toMinutes(row.appointment_time);
-            const existEnd = existStart + (row.duration || 30);
-            return newStart < existEnd && existStart < newEnd;
-          });
-          if (conflict) return res.status(409).json({ error: t(reqLang(req), 'Horário conflita com outro agendamento já marcado para este barbeiro') });
-
-          // Por padrão o agendamento já nasce confirmado: se o horário estava disponível para o
-          // cliente escolher, é porque o barbeiro está livre para atendê-lo, então não faz sentido
-          // exigir uma confirmação manual extra. Admin pode reativar a confirmação manual em
-          // Configurações > Agendamentos (auto_confirm = false).
-          isSettingEnabled('auto_confirm', (autoConfirm) => {
-            const initialStatus = autoConfirm ? 'confirmed' : 'pending';
-            db.run(
-              'INSERT INTO appointments (client_id, barber_id, service_id, appointment_date, appointment_time, notes, price, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-              [client_id, barber_id, service_id, appointment_date, appointment_time, notes, service.price, initialStatus],
-              function(err) {
-                if (err) {
-                  if (err.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'Horário já marcado') });
-                  return res.status(500).json({ error: err.message });
-                }
-                isSettingEnabled('notif_new_appt', (enabled) => {
-                  if (enabled) {
-                    criarNotificacao(barber_id, 'Novo agendamento',
-                      '{cliente} marcou {servico} em {data} às {hora}.', 'info',
-                      { cliente: req.user.name || 'Um cliente', servico: service.name, data: appointment_date, hora: appointment_time });
-                  }
-                });
-                res.status(201).json({ id: this.lastID, status: initialStatus });
-              }
-            );
-          });
-        }
-      );
-    });
-  });
-});
-
-app.get('/api/appointments', verifyToken, (req, res) => {
-  let query = `
-    SELECT a.*, s.name as service_name, COALESCE(a.price, s.price) as price, s.duration, b.name as barber_name,
-      c.name as client_name, c.phone as client_phone, c.photo_url as client_photo_url,
-      (SELECT COUNT(*) FROM appointments a2 WHERE a2.client_id = c.id) AS client_total_appointments,
-      (SELECT COUNT(*) FROM appointments a2 WHERE a2.client_id = c.id AND a2.status = 'cancelled') AS client_cancelled_appointments,
-      (SELECT COUNT(*) FROM appointments a3 WHERE a3.client_id = c.id AND a3.barber_id = a.barber_id AND a3.status = 'completed') AS client_cuts_with_barber
-    FROM appointments a
-    JOIN services s ON a.service_id = s.id
-    JOIN users b ON a.barber_id = b.id
-    JOIN users c ON a.client_id = c.id
-  `;
-  const params = [];
-  if (req.user.role === 'barber') {
-    query += ' WHERE a.barber_id = ?';
-    params.push(req.user.id);
-  } else if (req.user.role === 'client') {
-    query += ' WHERE a.client_id = ?';
-    params.push(req.user.id);
-  }
-  query += ' ORDER BY a.appointment_date DESC, a.appointment_time DESC';
-  db.all(query, params, (err, appointments) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(appointments);
-  });
-});
-
-app.get('/api/appointments/calendar/:date', verifyToken, (req, res) => {
-  db.all(`
-    SELECT a.*, s.name as service_name, s.duration, c.name as client_name, b.name as barber_name
-    FROM appointments a
-    JOIN services s ON a.service_id = s.id
-    JOIN users c ON a.client_id = c.id
-    JOIN users b ON a.barber_id = b.id
-    WHERE a.appointment_date = ? AND a.status != ?
-    ORDER BY a.appointment_time
-  `, [req.params.date, 'cancelled'], (err, appointments) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(appointments);
-  });
-});
-
-app.get('/api/appointments/available/:barber_id/:date', verifyToken, (req, res) => {
-  const { barber_id, date } = req.params;
-  const { service_id } = req.query;
-  const [y, mo, d] = date.split('-').map(Number);
-  const dayOfWeek = new Date(y, mo - 1, d).getDay();
-
-  const getDuration = service_id
-    ? new Promise(r => db.get('SELECT duration FROM services WHERE id = ?', [service_id], (e, row) => r(row?.duration || 30)))
-    : Promise.resolve(30);
-
-  getDuration.then(duration => {
-  db.all(
-    'SELECT start_time, end_time, break_start, break_end FROM working_hours WHERE barber_id = ? AND day_of_week = ?',
-    [barber_id, dayOfWeek],
-    (err, hours) => {
-      if (!hours || hours.length === 0) {
-        return res.json({ available: [], message: t(reqLang(req), 'Barbeiro não trabalha este dia') });
-      }
-      Promise.all([
-        new Promise(r => db.all(
-          `SELECT a.appointment_time, s.duration FROM appointments a
-           JOIN services s ON a.service_id = s.id
-           WHERE a.barber_id = ? AND a.appointment_date = ? AND a.status IN (?, ?)`,
-          [barber_id, date, 'pending', 'confirmed'],
-          (err, rows) => r(rows || [])
-        )),
-        new Promise(r => db.all(
-          'SELECT start_time, end_time FROM blocked_times WHERE barber_id = ? AND date = ?',
-          [barber_id, date],
-          (err, rows) => r(rows || [])
-        )),
-      ]).then(([booked, blocked]) => {
-        const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-        const bookedRanges = booked.map(b => ({ start: toMin(b.appointment_time), end: toMin(b.appointment_time) + (b.duration || 30) }))
-          .concat(blocked.map(b => ({ start: toMin(b.start_time), end: toMin(b.end_time) })));
-        res.json({ available: generateTimes(hours[0], bookedRanges, duration, date) });
-      });
-    }
-  );
-  });
-});
-
-app.patch('/api/appointments/:id/status', verifyToken, (req, res) => {
-  const { status } = req.body;
-  db.get(
-    'SELECT a.*, COALESCE(a.price, s.price) as price, s.duration, s.name as service_name FROM appointments a JOIN services s ON a.service_id = s.id WHERE a.id = ?',
-    [req.params.id],
-    (err, apt) => {
-      if (!apt) return res.status(404).json({ error: t(reqLang(req), 'Agendamento não encontrado') });
-      const isOwner = apt.client_id === req.user.id;
-      const isBarberOwner = req.user.role === 'barber' && apt.barber_id === req.user.id;
-      if (req.user.role !== 'admin' && !isOwner && !isBarberOwner) {
-        return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
-      }
-      if (status === 'cancelled' && ['cancelled', 'completed'].includes(apt.status)) {
-        return res.status(400).json({ error: t(reqLang(req), 'Este agendamento não pode mais ser cancelado') });
-      }
-      db.run('UPDATE appointments SET status = ? WHERE id = ?', [status, req.params.id], (err) => {
-        if (err) return res.status(500).json({ error: err.message });
-
-        if (isBarberOwner) {
-          const statusTemplates = {
-            confirmed: 'Seu agendamento de {servico} em {data} às {hora} foi confirmado pelo barbeiro.',
-            completed: 'Seu atendimento de {servico} foi concluído. Que tal avaliar o serviço?',
-            cancelled: 'Seu agendamento de {servico} em {data} às {hora} foi cancelado pelo barbeiro.',
-          };
-          const statusSettingKey = { confirmed: 'notif_confirm', completed: 'notif_review', cancelled: 'notif_cancel' };
-          if (statusTemplates[status]) {
-            isSettingEnabled(statusSettingKey[status], (enabled) => {
-              if (enabled) criarNotificacao(apt.client_id, 'Atualização do agendamento', statusTemplates[status], status === 'cancelled' ? 'warning' : 'info',
-                { servico: apt.service_name, data: apt.appointment_date, hora: apt.appointment_time });
-            });
-          }
-          return res.json({ id: req.params.id, status });
-        }
-
-        // Cliente solicitando cancelamento do próprio agendamento: cobra taxa configurada pelo admin
-        if (status === 'cancelled' && isOwner && req.user.role !== 'admin') {
-          db.all("SELECT key, value FROM settings WHERE key IN ('cancel_fee','notif_cancel')", [], (errFee, rows) => {
-            const s = Object.fromEntries((rows || []).map(r => [r.key, r.value]));
-            const pct = s.cancel_fee !== undefined ? parseFloat(s.cancel_fee) : 20;
-            const notifyEnabled = s.notif_cancel !== 'false';
-            const fee = pct > 0 ? Math.round(apt.price * (pct / 100) * 100) / 100 : 0;
-
-            if (fee > 0) {
-              db.run('INSERT INTO payments (appointment_id, amount, method, status) VALUES (?, ?, ?, ?)', [apt.id, fee, 'cancellation_fee', 'pending']);
-            }
-
-            if (notifyEnabled) {
-              const clienteTemplate = fee > 0
-                ? 'Seu agendamento de {servico} em {data} às {hora} foi cancelado. Taxa de cancelamento de {pct}% ({valor}) foi gerada e deve ser paga.'
-                : 'Seu agendamento de {servico} em {data} às {hora} foi cancelado.';
-              const clienteParams = { servico: apt.service_name, data: apt.appointment_date, hora: apt.appointment_time, pct, valor: fmtBRL(fee) };
-              criarNotificacao(apt.client_id, 'Cancelamento confirmado', clienteTemplate, fee > 0 ? 'warning' : 'info', clienteParams);
-
-              const terceiroTemplate = '{cliente} cancelou o agendamento de {servico} em {data} às {hora}.' + (fee > 0 ? ' Taxa de {valor} gerada (pendente).' : '');
-              const terceiroParams = { cliente: req.user.name || 'Um cliente', servico: apt.service_name, data: apt.appointment_date, hora: apt.appointment_time, valor: fmtBRL(fee) };
-              criarNotificacao(apt.barber_id, 'Cancelamento de agendamento', terceiroTemplate, 'info', terceiroParams);
-              db.all("SELECT id FROM users WHERE role = 'admin'", [], (errAdm, admins) => {
-                (admins || []).forEach(a => criarNotificacao(a.id, 'Cancelamento de agendamento', terceiroTemplate, 'info', terceiroParams));
-              });
-            }
-
-            res.json({ id: req.params.id, status, fee });
-          });
-        } else {
-          res.json({ id: req.params.id, status });
-        }
-      });
-    }
-  );
-});
-
-app.delete('/api/appointments/:id', verifyToken, (req, res) => {
-  db.get('SELECT * FROM appointments WHERE id = ?', [req.params.id], (err, apt) => {
-    if (!apt) return res.status(404).json({ error: t(reqLang(req), 'Agendamento não encontrado') });
-    if (apt.client_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
-    }
-    db.run('UPDATE appointments SET status = ? WHERE id = ?', ['cancelled', req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: req.params.id, status: 'cancelled' });
-    });
-  });
-});
 
 // ─── Pagamentos ───────────────────────────────────────────────────────────────
 
-app.get('/api/payments', verifyToken, (req, res) => {
-  let query = 'SELECT p.*, a.appointment_date, a.appointment_time, s.name as service_name FROM payments p JOIN appointments a ON p.appointment_id = a.id JOIN services s ON a.service_id = s.id WHERE a.id IN (SELECT id FROM appointments';
-  const params = [];
-  if (req.user.role === 'client') {
-    query += ' WHERE client_id = ?)';
-    params.push(req.user.id);
-  } else if (req.user.role === 'barber') {
-    query += ' WHERE barber_id = ?)';
-    params.push(req.user.id);
-  } else {
-    query += ')';
-  }
-  query += ' ORDER BY p.created_at DESC';
-  db.all(query, params, (err, payments) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(payments);
-  });
-});
 
-app.post('/api/payments', verifyToken, (req, res) => {
-  const { appointment_id, amount, method } = req.body;
-  db.run(
-    'INSERT INTO payments (appointment_id, amount, method, status) VALUES (?, ?, ?, ?)',
-    [appointment_id, amount, method, 'completed'],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      db.run('UPDATE appointments SET status = ? WHERE id = ?', ['completed', appointment_id]);
-      res.status(201).json({ id: this.lastID, status: 'completed' });
-    }
-  );
-});
 
 // ─── Avaliações ───────────────────────────────────────────────────────────────
 
-app.post('/api/reviews', verifyToken, verifyRole(['client']), (req, res) => {
-  const { appointment_id, rating, comment } = req.body;
-  if (!appointment_id || !rating) return res.status(400).json({ error: t(reqLang(req), 'Agendamento e nota são obrigatórios') });
-  db.get('SELECT * FROM appointments WHERE id = ?', [appointment_id], (err, apt) => {
-    if (!apt) return res.status(404).json({ error: t(reqLang(req), 'Agendamento não encontrado') });
-    if (apt.client_id !== req.user.id) return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
-    if (apt.status !== 'completed') return res.status(400).json({ error: t(reqLang(req), 'Só é possível avaliar atendimentos concluídos') });
-    db.get('SELECT id FROM reviews WHERE appointment_id = ?', [appointment_id], (err, existing) => {
-      if (existing) return res.status(409).json({ error: t(reqLang(req), 'Este atendimento já foi avaliado') });
-      db.run(
-        'INSERT INTO reviews (appointment_id, client_id, barber_id, rating, comment) VALUES (?, ?, ?, ?, ?)',
-        [appointment_id, apt.client_id, apt.barber_id, rating, comment || null],
-        function(err) {
-          if (err) {
-            if (err.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'Este atendimento já foi avaliado') });
-            return res.status(500).json({ error: err.message });
-          }
-          res.status(201).json({ id: this.lastID, appointment_id, rating, comment });
-        }
-      );
-    });
-  });
-});
 
-app.put('/api/reviews/:id', verifyToken, verifyRole(['client']), (req, res) => {
-  const { rating, comment } = req.body;
-  if (!rating) return res.status(400).json({ error: t(reqLang(req), 'Nota é obrigatória') });
-  db.get('SELECT * FROM reviews WHERE id = ?', [req.params.id], (err, review) => {
-    if (!review) return res.status(404).json({ error: t(reqLang(req), 'Avaliação não encontrada') });
-    if (review.client_id !== req.user.id) return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
-    db.run('UPDATE reviews SET rating = ?, comment = ? WHERE id = ?', [rating, comment || null, req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: Number(req.params.id), rating, comment: comment || null });
-    });
-  });
-});
 
-app.delete('/api/reviews/:id', verifyToken, verifyRole(['client']), (req, res) => {
-  db.get('SELECT * FROM reviews WHERE id = ?', [req.params.id], (err, review) => {
-    if (!review) return res.status(404).json({ error: t(reqLang(req), 'Avaliação não encontrada') });
-    if (review.client_id !== req.user.id) return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
-    db.run('DELETE FROM reviews WHERE id = ?', [req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ message: t(reqLang(req), 'Avaliação removida') });
-    });
-  });
-});
 
-app.get('/api/barbers/:id/reviews', (req, res) => {
-  db.all(`
-    SELECT r.*, c.name as client_name
-    FROM reviews r JOIN users c ON r.client_id = c.id
-    WHERE r.barber_id = ? AND (r.hidden IS NULL OR r.hidden = 0) ORDER BY r.created_at DESC
-  `, [req.params.id], (err, reviews) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(reviews);
-  });
-});
 
-app.get('/api/reviews/recent', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(`
-    SELECT r.*, c.name as client_name, b.name as barber_name
-    FROM reviews r
-    JOIN users c ON r.client_id = c.id
-    JOIN users b ON r.barber_id = b.id
-    ORDER BY r.created_at DESC LIMIT 10
-  `, (err, reviews) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(reviews);
-  });
-});
 
-app.get('/api/reviews', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(`
-    SELECT r.*, c.name as client_name, b.name as barber_name, s.name as service_name
-    FROM reviews r
-    JOIN users c ON r.client_id = c.id
-    JOIN users b ON r.barber_id = b.id
-    JOIN appointments a ON r.appointment_id = a.id
-    JOIN services s ON a.service_id = s.id
-    ORDER BY r.created_at DESC
-  `, (err, reviews) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(reviews);
-  });
-});
 
-app.get('/api/reviews/mine', verifyToken, verifyRole(['barber', 'client']), (req, res) => {
-  const column = req.user.role === 'barber' ? 'r.barber_id' : 'r.client_id';
-  db.all(`
-    SELECT r.*, c.name as client_name, b.name as barber_name, s.name as service_name
-    FROM reviews r
-    JOIN users c ON r.client_id = c.id
-    JOIN users b ON r.barber_id = b.id
-    JOIN appointments a ON r.appointment_id = a.id
-    JOIN services s ON a.service_id = s.id
-    WHERE ${column} = ?
-    ORDER BY r.created_at DESC
-  `, [req.user.id], (err, reviews) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(reviews);
-  });
-});
 
-app.patch('/api/reviews/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { featured, hidden } = req.body;
-  db.get('SELECT * FROM reviews WHERE id = ?', [req.params.id], (err, review) => {
-    if (!review) return res.status(404).json({ error: t(reqLang(req), 'Avaliação não encontrada') });
-    const newFeatured = featured !== undefined ? (featured ? 1 : 0) : review.featured;
-    const newHidden = hidden !== undefined ? (hidden ? 1 : 0) : review.hidden;
-    db.run('UPDATE reviews SET featured = ?, hidden = ? WHERE id = ?', [newFeatured, newHidden, req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: Number(req.params.id), featured: !!newFeatured, hidden: !!newHidden });
-    });
-  });
-});
 
-app.patch('/api/reviews/:id/reply', verifyToken, verifyRole(['barber']), (req, res) => {
-  const { reply } = req.body;
-  db.get('SELECT * FROM reviews WHERE id = ?', [req.params.id], (err, review) => {
-    if (!review) return res.status(404).json({ error: t(reqLang(req), 'Avaliação não encontrada') });
-    if (review.barber_id !== req.user.id) return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
-    db.run('UPDATE reviews SET reply = ?, reply_at = CURRENT_TIMESTAMP WHERE id = ?', [reply || null, req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: Number(req.params.id), reply });
-    });
-  });
-});
 
 // ─── Promoções ────────────────────────────────────────────────────────────────
 
-app.get('/api/promotions', (req, res) => {
-  db.all('SELECT * FROM promotions WHERE active = 1 AND valid_until > ?',
-    [new Date().toISOString()], (err, promotions) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(promotions);
-  });
-});
 
-app.post('/api/promotions', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { code, discount_type, discount_value, valid_until, max_uses } = req.body;
-  db.run(
-    'INSERT INTO promotions (code, discount_type, discount_value, valid_until, max_uses) VALUES (?, ?, ?, ?, ?)',
-    [code, discount_type, discount_value, valid_until, max_uses],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, code });
-    }
-  );
-});
 
-app.post('/api/promotions/validate', (req, res) => {
-  const { code } = req.body;
-  db.get(
-    `SELECT * FROM promotions WHERE code = ? AND active = 1 AND valid_until > ? AND uses_count < max_uses`,
-    [code, new Date().toISOString()],
-    (err, promo) => {
-      if (!promo) return res.status(404).json({ error: t(reqLang(req), 'Cupom inválido') });
-      res.json({ code: promo.code, discount_type: promo.discount_type, discount_value: promo.discount_value });
-    }
-  );
-});
 
 // ─── Fila de espera ───────────────────────────────────────────────────────────
 
-app.get('/api/waitlist/mine', verifyToken, (req, res) => {
-  db.all(`
-    SELECT w.*, s.name as service_name, b.name as barber_name
-    FROM waitlist w
-    JOIN services s ON w.service_id = s.id
-    JOIN users b ON w.barber_id = b.id
-    WHERE w.client_id = ?
-    ORDER BY w.created_at DESC
-  `, [req.user.id], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows || []);
-  });
-});
 
-app.post('/api/waitlist', verifyToken, (req, res) => {
-  const { service_id, barber_id, preferred_date } = req.body;
-  const client_id = req.user.id;
-  db.get(
-    'SELECT COUNT(*) as count FROM waitlist WHERE service_id = ? AND barber_id = ? AND preferred_date = ?',
-    [service_id, barber_id, preferred_date],
-    (err, result) => {
-      const position = (result?.count || 0) + 1;
-      db.run(
-        'INSERT INTO waitlist (client_id, service_id, barber_id, preferred_date, position) VALUES (?, ?, ?, ?, ?)',
-        [client_id, service_id, barber_id, preferred_date, position],
-        function(err) {
-          if (err) return res.status(500).json({ error: err.message });
-          res.status(201).json({ id: this.lastID, position });
-        }
-      );
-    }
-  );
-});
 
-app.delete('/api/waitlist/:id', verifyToken, (req, res) => {
-  db.run('DELETE FROM waitlist WHERE id = ? AND client_id = ?', [req.params.id, req.user.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ message: t(reqLang(req), 'Removido da fila') });
-  });
-});
 
 // ─── Dashboard & Relatórios ───────────────────────────────────────────────────
 
-app.get('/api/dashboard/stats', verifyToken, verifyRole(['admin']), (req, res) => {
-  Promise.all([
-    new Promise(r => db.get('SELECT COUNT(*) as count FROM users WHERE role = ?', ['client'], (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get('SELECT COUNT(*) as count FROM appointments WHERE status = ?', ['completed'], (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get(`SELECT SUM(COALESCE(a.price, s.price)) as total FROM appointments a JOIN services s ON a.service_id = s.id WHERE a.status = 'completed' AND a.appointment_date >= CURRENT_DATE - INTERVAL '30 days'`, (e, row) => r(row?.total || 0))),
-    new Promise(r => db.get('SELECT COUNT(*) as count FROM appointments WHERE status = ?', ['pending'], (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get(`SELECT COUNT(*) as count FROM users WHERE role = 'client' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '6 days'`, (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get(`SELECT COUNT(*) as count FROM users WHERE role = 'client' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '13 days' AND created_at < CURRENT_TIMESTAMP - INTERVAL '6 days'`, (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get(`SELECT COUNT(*) as count FROM appointments WHERE status = 'completed' AND appointment_date >= CURRENT_DATE - INTERVAL '6 days'`, (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get(`SELECT COUNT(*) as count FROM appointments WHERE status = 'completed' AND appointment_date >= CURRENT_DATE - INTERVAL '13 days' AND appointment_date < CURRENT_DATE - INTERVAL '6 days'`, (e, row) => r(row?.count || 0))),
-    new Promise(r => db.get(`SELECT SUM(COALESCE(a.price, s.price)) as total FROM appointments a JOIN services s ON a.service_id = s.id WHERE a.status = 'completed' AND a.appointment_date >= CURRENT_DATE - INTERVAL '60 days' AND a.appointment_date < CURRENT_DATE - INTERVAL '30 days'`, (e, row) => r(row?.total || 0))),
-    new Promise(r => db.all(`
-      SELECT b.id, b.name, COUNT(a.id) as completed, AVG(r.rating) as rating, COUNT(r.id) as reviews
-      FROM users b
-      LEFT JOIN appointments a ON b.id = a.barber_id AND a.status = 'completed'
-      LEFT JOIN reviews r ON a.id = r.appointment_id
-      WHERE b.role = 'barber' GROUP BY b.id
-    `, (e, rows) => r(rows || []))),
-    new Promise(r => db.all(`
-      SELECT s.id, s.name, COUNT(a.id) as completed
-      FROM services s
-      LEFT JOIN appointments a ON s.id = a.service_id AND a.status = 'completed'
-      GROUP BY s.id ORDER BY completed DESC LIMIT 4
-    `, (e, rows) => r(rows || []))),
-    new Promise(r => db.all(`
-      SELECT date(appointment_date) as day,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending
-      FROM appointments
-      WHERE appointment_date >= CURRENT_DATE - INTERVAL '6 days'
-      GROUP BY day
-    `, (e, rows) => r(rows || []))),
-    new Promise(r => db.all(`
-      SELECT date(a.appointment_date) as day, SUM(COALESCE(a.price, s.price)) as total
-      FROM appointments a JOIN services s ON a.service_id = s.id
-      WHERE a.status = 'completed' AND a.appointment_date >= CURRENT_DATE - INTERVAL '6 days'
-      GROUP BY day
-    `, (e, rows) => r(rows || []))),
-  ]).then(([clients, completed, revenue, pending, newClients7d, newClientsPrev7d, completed7d, completedPrev7d, revenuePrev30d, barbers, topServices, aptByDay, revByDay]) => {
-    const last7 = Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(); d.setDate(d.getDate() - (6 - i));
-      return d.toISOString().slice(0, 10);
-    });
-    const aptMap = Object.fromEntries(aptByDay.map(r => [r.day, r]));
-    const revMap = Object.fromEntries(revByDay.map(r => [r.day, r.total]));
-    const appointments_chart = {
-      labels: last7,
-      completed: last7.map(d => aptMap[d]?.completed || 0),
-      pending: last7.map(d => aptMap[d]?.pending || 0),
-    };
-    const revenue_chart = {
-      labels: last7,
-      values: last7.map(d => revMap[d] || 0),
-    };
-    res.json({
-      total_clients: clients, completed_appointments: completed, revenue, pending_appointments: pending,
-      barber_stats: barbers, top_services: topServices, appointments_chart, revenue_chart,
-      new_clients_7d: newClients7d, new_clients_prev_7d: newClientsPrev7d,
-      completed_7d: completed7d, completed_prev_7d: completedPrev7d, revenue_prev_30d: revenuePrev30d,
-    });
-  });
-});
 
-app.get('/api/admin/backup', verifyToken, verifyRole(['admin']), (req, res) => {
-  logEvent('INFO', 'Backup solicitado por {usuario}', { usuario: req.user.name || req.user.email });
-  res.status(501).json({ message: t(reqLang(req), 'Backups são feitos automaticamente pelos snapshots do Aurora PostgreSQL. Não há mais um arquivo local para baixar.') });
-});
 
-app.get('/api/admin/system-info', verifyToken, verifyRole(['admin']), (req, res) => {
-  res.json({
-    version: pkg.version,
-    environment: process.env.NODE_ENV || 'development',
-    database: 'PostgreSQL (Aurora)',
-    node_version: process.version,
-    uptime_seconds: Math.floor((Date.now() - serverStartedAt.getTime()) / 1000),
-    started_at: serverStartedAt.toISOString(),
-  });
-});
 
-app.get('/api/admin/system-log', verifyToken, verifyRole(['admin']), (req, res) => {
-  const lang = reqLang(req);
-  res.json(systemLog.map(l => ({ time: l.time, level: l.level, message: t(lang, l.key, l.params) })));
-});
 
-app.delete('/api/admin/system-log', verifyToken, verifyRole(['admin']), (req, res) => {
-  systemLog.length = 0;
-  logEvent('INFO', 'Log limpo por {usuario}', { usuario: req.user.name || req.user.email });
-  res.json({ ok: true });
-});
 
-app.get('/api/clients', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(
-    `SELECT
-       u.id, u.name, u.email, u.phone, u.document, u.photo_url, u.is_vip, u.created_at,
-       COALESCE((SELECT COUNT(*) FROM appointments a WHERE a.client_id = u.id), 0) AS total_appointments,
-       COALESCE((SELECT COUNT(*) FROM appointments a WHERE a.client_id = u.id AND a.status = 'completed'), 0) AS total_visits,
-       COALESCE((SELECT COUNT(*) FROM appointments a WHERE a.client_id = u.id AND a.status = 'cancelled'), 0) AS total_cancelled,
-       COALESCE((SELECT SUM(COALESCE(a.price, s.price)) FROM appointments a JOIN services s ON s.id = a.service_id WHERE a.client_id = u.id AND a.status = 'completed'), 0) AS total_spent,
-       (SELECT a.appointment_date FROM appointments a WHERE a.client_id = u.id AND a.status = 'completed' ORDER BY a.appointment_date DESC LIMIT 1) AS last_visit,
-       (SELECT b.name FROM appointments a JOIN users b ON b.id = a.barber_id WHERE a.client_id = u.id AND a.status = 'completed' GROUP BY a.barber_id, b.name ORDER BY COUNT(*) DESC LIMIT 1) AS favorite_barber,
-       (SELECT s.name FROM appointments a JOIN services s ON s.id = a.service_id WHERE a.client_id = u.id AND a.status = 'completed' GROUP BY a.service_id, s.name ORDER BY COUNT(*) DESC LIMIT 1) AS favorite_service,
-       (SELECT ROUND(AVG(r.rating)::numeric, 1) FROM reviews r WHERE r.client_id = u.id) AS avg_rating_given
-     FROM users u
-     WHERE u.role = 'client'
-     ORDER BY u.created_at DESC`,
-    (err, clients) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(clients);
-    }
-  );
-});
 
-app.get('/api/admin/clients/:id/appointments', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(
-    `SELECT a.id, a.appointment_date, a.appointment_time, a.status, s.name AS service_name, COALESCE(a.price, s.price) as price, b.name AS barber_name
-     FROM appointments a
-     JOIN services s ON s.id = a.service_id
-     JOIN users b ON b.id = a.barber_id
-     WHERE a.client_id = ?
-     ORDER BY a.appointment_date DESC, a.appointment_time DESC
-     LIMIT 20`,
-    [req.params.id],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(rows);
-    }
-  );
-});
 
-app.patch('/api/admin/clients/:id/vip', verifyToken, verifyRole(['admin']), (req, res) => {
-  const isVip = req.body.is_vip ? 1 : 0;
-  db.run('UPDATE users SET is_vip = ? WHERE id = ? AND role = ?', [isVip, req.params.id, 'client'], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    if (this.changes === 0) return res.status(404).json({ error: t(reqLang(req), 'Cliente não encontrado') });
-    res.json({ id: Number(req.params.id), is_vip: !!isVip });
-  });
-});
 
-app.put('/api/clients/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { name, email, phone, document } = req.body;
-  if (!name || !email) {
-    return res.status(400).json({ error: t(reqLang(req), 'Nome e e-mail são obrigatórios') });
-  }
-  const clientId = req.params.id;
-  const normalizedEmail = email.trim().toLowerCase();
-  const phoneDigits = phone ? phone.replace(/\D/g, '') : null;
 
-  db.get('SELECT id FROM users WHERE id = ? AND role = ?', [clientId, 'client'], (err, client) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!client) return res.status(404).json({ error: t(reqLang(req), 'Cliente não encontrado') });
 
-    const applyUpdate = () => {
-      db.run(
-        'UPDATE users SET name = ?, email = ?, phone = ?, document = ? WHERE id = ?',
-        [name, normalizedEmail, phone || null, document || null, clientId],
-        function(err2) {
-          if (err2) {
-            if (err2.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'E-mail ou documento já cadastrado para outro usuário') });
-            return res.status(500).json({ error: t(reqLang(req), 'Erro ao atualizar cliente') });
-          }
-          res.json({ id: Number(clientId), name, email: normalizedEmail, phone: phone || null, document: document || null });
-        }
-      );
-    };
 
-    db.get(
-      'SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND id != ?',
-      [normalizedEmail, clientId],
-      (err3, existingEmail) => {
-        if (existingEmail) return res.status(409).json({ error: t(reqLang(req), 'E-mail já cadastrado para outro usuário') });
-        if (!phoneDigits) return applyUpdate();
 
-        db.get(
-          `SELECT id FROM users WHERE id != ? AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'(',''),')',''),'-',''),' ','') = ?`,
-          [clientId, phoneDigits],
-          (err4, existingPhone) => {
-            if (existingPhone) return res.status(409).json({ error: t(reqLang(req), 'Telefone já cadastrado para outro usuário') });
-            applyUpdate();
-          }
-        );
-      }
-    );
-  });
-});
-
-app.delete('/api/clients/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  const clientId = req.params.id;
-  db.get('SELECT id FROM users WHERE id = ? AND role = ?', [clientId, 'client'], (err, client) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!client) return res.status(404).json({ error: t(reqLang(req), 'Cliente não encontrado') });
-
-    db.get('SELECT COUNT(*) as count FROM appointments WHERE client_id = ?', [clientId], (err2, row) => {
-      if (err2) return res.status(500).json({ error: err2.message });
-      if (row.count > 0) {
-        return res.status(409).json({ error: t(reqLang(req), 'Não é possível excluir um cliente com agendamentos registrados. Considere apenas editar os dados dele.') });
-      }
-      db.run('DELETE FROM users WHERE id = ?', [clientId], (err3) => {
-        if (err3) return res.status(500).json({ error: err3.message });
-        res.json({ message: t(reqLang(req), 'Cliente removido com sucesso') });
-      });
-    });
-  });
-});
-
-app.get('/api/barbers', (req, res) => {
-  db.all('SELECT id, name, email, phone, photo_url, specialty, bio, portfolio_photos, intro_video_url, instagram FROM users WHERE role = ? ORDER BY name', ['barber'], (err, barbers) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(barbers);
-  });
-});
-
-app.post('/api/barbers', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { name, email, phone, password, force_password_change } = req.body;
-  if (!name || !email || !password) return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
-  const hashedPassword = bcrypt.hashSync(password, 10);
-  const mustChangePassword = force_password_change !== false ? 1 : 0;
-  db.run(
-    'INSERT INTO users (name, email, phone, password, role, must_change_password) VALUES (?, ?, ?, ?, ?, ?)',
-    [name, email, phone, hashedPassword, 'barber', mustChangePassword],
-    function(err) {
-      if (err) {
-        if (err.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'Email já cadastrado') });
-        return res.status(500).json({ error: err.message });
-      }
-      // Garante que o barbeiro já tenha uma escala padrão, evitando que o cliente veja
-      // "nenhum horário disponível" em todas as datas até o barbeiro configurar a própria escala.
-      seedDefaultSchedule(this.lastID);
-      res.status(201).json({ id: this.lastID, name, email, phone, role: 'barber', must_change_password: !!mustChangePassword });
-    }
-  );
-});
-
-app.delete('/api/barbers/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.get('SELECT * FROM users WHERE id = ? AND role = ?', [req.params.id, 'barber'], (err, barber) => {
-    if (!barber) return res.status(404).json({ error: t(reqLang(req), 'Barbeiro não encontrado') });
-    db.run('DELETE FROM users WHERE id = ?', [req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ message: t(reqLang(req), 'Barbeiro removido com sucesso') });
-    });
-  });
-});
 
 // ─── Horários de trabalho ─────────────────────────────────────────────────────
 
-app.get('/api/barbers/:id/working-hours', verifyToken, (req, res) => {
-  db.all('SELECT * FROM working_hours WHERE barber_id = ? ORDER BY day_of_week', [req.params.id], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows || []);
-  });
-});
 
-app.put('/api/barbers/:id/working-hours', verifyToken, (req, res) => {
-  const { id } = req.params;
-  const { schedule } = req.body;
-  if (!schedule || !Array.isArray(schedule)) return res.status(400).json({ error: t(reqLang(req), 'Schedule inválido') });
-  db.run('DELETE FROM working_hours WHERE barber_id = ?', [id], (err) => {
-    if (err) return res.status(500).json({ error: t(reqLang(req), 'Erro ao atualizar horários') });
-    const rows = schedule.filter(s => !s.closed);
-    Promise.all(rows.map(s => db.run(
-      'INSERT INTO working_hours (barber_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)',
-      [id, s.day_of_week, s.start_time, s.end_time]
-    )))
-      .then(() => res.json({ success: true }))
-      .catch((err2) => res.status(500).json({ error: err2.message }));
-  });
-});
 
 // ─── Ausências ────────────────────────────────────────────────────────────────
 
-app.get('/api/absences', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(`
-    SELECT a.*, u.name as barber_name
-    FROM absences a JOIN users u ON a.barber_id = u.id
-    ORDER BY a.created_at DESC
-  `, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
 
-app.get('/api/absences/me', verifyToken, verifyRole(['barber']), (req, res) => {
-  db.all('SELECT * FROM absences WHERE barber_id = ? ORDER BY created_at DESC', [req.user.id], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
 
-app.post('/api/absences', verifyToken, verifyRole(['barber']), (req, res) => {
-  const { start_date, end_date, reason } = req.body;
-  if (!start_date || !end_date) return res.status(400).json({ error: t(reqLang(req), 'Datas de início e fim são obrigatórias') });
-  db.run(
-    'INSERT INTO absences (barber_id, start_date, end_date, reason) VALUES (?, ?, ?, ?)',
-    [req.user.id, start_date, end_date, reason || null],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, barber_id: req.user.id, start_date, end_date, reason, status: 'pending' });
-    }
-  );
-});
 
-app.patch('/api/absences/:id/status', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { status } = req.body;
-  if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: t(reqLang(req), 'Status inválido') });
-  db.run('UPDATE absences SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?', [status, req.params.id], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    if (this.changes === 0) return res.status(404).json({ error: t(reqLang(req), 'Ausência não encontrada') });
-    res.json({ id: Number(req.params.id), status });
-  });
-});
 
-app.delete('/api/absences/:id', verifyToken, verifyRole(['barber']), (req, res) => {
-  db.get('SELECT * FROM absences WHERE id = ? AND barber_id = ?', [req.params.id, req.user.id], (err, absence) => {
-    if (!absence) return res.status(404).json({ error: t(reqLang(req), 'Ausência não encontrada') });
-    if (absence.status !== 'pending') return res.status(400).json({ error: t(reqLang(req), 'Apenas solicitações pendentes podem ser canceladas') });
-    db.run('DELETE FROM absences WHERE id = ?', [req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ message: t(reqLang(req), 'Solicitação cancelada') });
-    });
-  });
-});
 
 // ─── Solicitações de folga (escala semanal) ───────────────────────────────────
 
-app.get('/api/dayoff-requests', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(`
-    SELECT r.*, u.name as barber_name
-    FROM dayoff_requests r JOIN users u ON r.barber_id = u.id
-    ORDER BY r.created_at DESC
-  `, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
 
-app.get('/api/dayoff-requests/me', verifyToken, verifyRole(['barber']), (req, res) => {
-  db.all('SELECT * FROM dayoff_requests WHERE barber_id = ? ORDER BY created_at DESC', [req.user.id], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows || []);
-  });
-});
 
-app.post('/api/dayoff-requests', verifyToken, verifyRole(['barber']), (req, res) => {
-  const { day_of_week } = req.body;
-  if (day_of_week === undefined || day_of_week === null || day_of_week < 0 || day_of_week > 6) {
-    return res.status(400).json({ error: t(reqLang(req), 'Dia da semana inválido') });
-  }
-  db.get(
-    "SELECT id FROM dayoff_requests WHERE barber_id = ? AND day_of_week = ? AND status = 'pending'",
-    [req.user.id, day_of_week],
-    (err, existing) => {
-      if (err) return res.status(500).json({ error: err.message });
-      if (existing) return res.status(400).json({ error: t(reqLang(req), 'Já existe uma solicitação pendente para este dia') });
-      db.run(
-        'INSERT INTO dayoff_requests (barber_id, day_of_week) VALUES (?, ?)',
-        [req.user.id, day_of_week],
-        function (err) {
-          if (err) return res.status(500).json({ error: err.message });
-          db.all("SELECT id FROM users WHERE role = 'admin'", [], (errAdm, admins) => {
-            (admins || []).forEach(a => {
-              criarNotificacao(a.id, 'Solicitação de folga', '{nome} solicitou folga em {dia} na escala semanal.', 'info',
-                { nome: req.user.name, diaSemanaIdx: day_of_week });
-            });
-          });
-          res.status(201).json({ id: this.lastID, barber_id: req.user.id, day_of_week, status: 'pending' });
-        }
-      );
-    }
-  );
-});
 
-app.patch('/api/dayoff-requests/:id/status', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { status } = req.body;
-  if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: t(reqLang(req), 'Status inválido') });
-  db.get('SELECT * FROM dayoff_requests WHERE id = ?', [req.params.id], (err, request) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!request) return res.status(404).json({ error: t(reqLang(req), 'Solicitação não encontrada') });
-    db.run('UPDATE dayoff_requests SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?', [status, req.params.id], function (err) {
-      if (err) return res.status(500).json({ error: err.message });
-      const finish = () => {
-        criarNotificacao(
-          request.barber_id,
-          status === 'approved' ? 'Folga aprovada' : 'Folga recusada',
-          status === 'approved' ? 'Sua solicitação de folga em {dia} foi aprovada.' : 'Sua solicitação de folga em {dia} foi recusada.',
-          status === 'approved' ? 'success' : 'warning',
-          { diaSemanaIdx: request.day_of_week }
-        );
-        res.json({ id: Number(req.params.id), status });
-      };
-      if (status === 'approved') {
-        db.run('DELETE FROM working_hours WHERE barber_id = ? AND day_of_week = ?', [request.barber_id, request.day_of_week], (err) => {
-          if (err) return res.status(500).json({ error: err.message });
-          finish();
-        });
-      } else {
-        finish();
-      }
-    });
-  });
-});
 
-app.delete('/api/dayoff-requests/:id', verifyToken, verifyRole(['barber']), (req, res) => {
-  db.get('SELECT * FROM dayoff_requests WHERE id = ? AND barber_id = ?', [req.params.id, req.user.id], (err, request) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!request) return res.status(404).json({ error: t(reqLang(req), 'Solicitação não encontrada') });
-    if (request.status !== 'pending') return res.status(400).json({ error: t(reqLang(req), 'Apenas solicitações pendentes podem ser canceladas') });
-    db.run('DELETE FROM dayoff_requests WHERE id = ?', [req.params.id], (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ message: t(reqLang(req), 'Solicitação cancelada') });
-    });
-  });
-});
 
 // ─── Horários bloqueados ──────────────────────────────────────────────────────
 
-app.get('/api/blocked-times/by-date/:date', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(
-    `SELECT bt.*, u.name as barber_name FROM blocked_times bt
-     JOIN users u ON bt.barber_id = u.id
-     WHERE bt.date = ? ORDER BY bt.start_time`,
-    [req.params.date],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(rows);
-    }
-  );
-});
 
-app.get('/api/blocked-times/:barber_id/:date', verifyToken, verifyRole(['admin', 'barber']), (req, res) => {
-  db.all(
-    'SELECT * FROM blocked_times WHERE barber_id = ? AND date = ?',
-    [req.params.barber_id, req.params.date],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(rows);
-    }
-  );
-});
 
-app.post('/api/blocked-times', verifyToken, verifyRole(['admin']), (req, res) => {
-  const { barber_id, date, start_time, end_time, reason } = req.body;
-  db.run(
-    'INSERT INTO blocked_times (barber_id, date, start_time, end_time, reason) VALUES (?, ?, ?, ?, ?)',
-    [barber_id, date, start_time, end_time, reason],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID });
-    }
-  );
-});
 
-app.delete('/api/blocked-times/:id', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.run('DELETE FROM blocked_times WHERE id = ?', [req.params.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ message: t(reqLang(req), 'Bloqueio removido') });
-  });
-});
 
 // ─── Configurações ────────────────────────────────────────────────────────────
 
-app.get('/api/settings', (req, res) => {
-  db.all('SELECT key, value FROM settings', (err, settings) => {
-    if (err) return res.status(500).json({ error: err.message });
-    const obj = {};
-    settings?.forEach(s => { obj[s.key] = s.value; });
-    res.json(obj);
-  });
-});
 
-app.patch('/api/settings', verifyToken, verifyRole(['admin']), (req, res) => {
-  const updates = req.body;
-  const keys = Object.keys(updates);
-  let done = 0;
-  if (keys.length === 0) return res.json({ message: t(reqLang(req), 'Nada para atualizar') });
-  keys.forEach(key => {
-    db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [key, updates[key]], () => {
-      done++;
-      if (done === keys.length) res.json({ message: t(reqLang(req), 'Configurações atualizadas') });
-    });
-  });
-});
 
 // ─── Relatórios ───────────────────────────────────────────────────────────────
 
-app.get('/api/reports/revenue', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(`
-    SELECT a.appointment_date as date, SUM(COALESCE(a.price, s.price)) as total, COUNT(*) as count
-    FROM appointments a JOIN services s ON a.service_id = s.id
-    WHERE a.status = 'completed'
-    GROUP BY a.appointment_date ORDER BY date DESC
-  `, (err, data) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(data);
-  });
-});
 
-app.get('/api/reports/appointments', verifyToken, verifyRole(['admin']), (req, res) => {
-  db.all(`
-    SELECT s.name as service, COUNT(*) as total,
-      SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) as completed,
-      SUM(CASE WHEN a.status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
-    FROM appointments a JOIN services s ON a.service_id = s.id GROUP BY s.id
-  `, (err, data) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(data);
-  });
-});
 
 // ─── Usuário logado ───────────────────────────────────────────────────────────
 
 app.get('/api/me', verifyToken, (req, res) => {
-  db.get('SELECT id, name, email, phone, role, address, document, photo_url, specialty, theme, language, birth_date, gender, is_vip, service_preferences, bio, portfolio_photos, intro_video_url, instagram, referral_code, created_at FROM users WHERE id = ?', [req.user.id], (err, user) => {
+  db.get('SELECT id, name, email, phone, role, document, photo_url, theme, created_at FROM users WHERE id = ?', [req.user.id], (err, user) => {
     if (err || !user) return res.status(404).json({ error: t(reqLang(req), 'Usuário não encontrado') });
     res.json(user);
   });
@@ -2147,31 +912,8 @@ app.get('/api/me', verifyToken, (req, res) => {
 
 // Gera (na primeira vez) e devolve o código de indicação do cliente logado.
 // Idempotente: se já existir, retorna o mesmo — não invalida links já compartilhados.
-app.post('/api/me/referral-code', verifyToken, (req, res) => {
-  db.get('SELECT referral_code FROM users WHERE id = ?', [req.user.id], (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (row && row.referral_code) return res.json({ referral_code: row.referral_code });
-    const tryGenerate = (attemptsLeft) => {
-      const code = crypto.randomBytes(6).toString('base64url').slice(0, 8).toUpperCase();
-      db.run('UPDATE users SET referral_code = ? WHERE id = ?', [code, req.user.id], function(genErr) {
-        if (genErr) {
-          if (genErr.code === '23505' && attemptsLeft > 0) return tryGenerate(attemptsLeft - 1);
-          return res.status(500).json({ error: t(reqLang(req), 'Erro ao gerar código de indicação') });
-        }
-        res.json({ referral_code: code });
-      });
-    };
-    tryGenerate(5);
-  });
-});
 
 // Quantas indicações do cliente logado já se converteram em cadastro.
-app.get('/api/referrals/me', verifyToken, (req, res) => {
-  db.get('SELECT COUNT(*) AS count FROM referrals WHERE referrer_id = ?', [req.user.id], (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ count: row ? row.count : 0 });
-  });
-});
 
 app.patch('/api/me', verifyToken, async (req, res) => {
   try {
@@ -2227,21 +969,6 @@ app.patch('/api/me', verifyToken, async (req, res) => {
 
 const fmtBRL = (n) => `R$ ${Number(n || 0).toFixed(2).replace('.', ',')}`;
 
-// Envia um push para todas as assinaturas ativas de um usuário (silencioso se ele não tiver nenhuma)
-function sendPushToUser(userId, title, body, extra = {}) {
-  db.all('SELECT * FROM push_subscriptions WHERE user_id = ?', [userId], (err, subs) => {
-    if (err || !subs) return;
-    const payload = JSON.stringify({ title, body, ...extra });
-    subs.forEach(sub => {
-      const subscription = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
-      webpush.sendNotification(subscription, payload).catch(pushErr => {
-        if (pushErr.statusCode === 404 || pushErr.statusCode === 410) {
-          db.run('DELETE FROM push_subscriptions WHERE endpoint = ?', [sub.endpoint]);
-        }
-      });
-    });
-  });
-}
 
 // Lê um toggle da tabela settings (chave/valor 'true'/'false'). Sem registro = habilitado por padrão.
 function isSettingEnabled(key, cb) {
@@ -2265,140 +992,22 @@ function criarNotificacao(userId, titleKey, messageTemplate, type = 'info', para
     const message = t(lang, messageTemplate, resolvedParams);
     db.run('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)', [userId, title, message, type]);
     isSettingEnabled('channel_push', (enabled) => {
-      if (enabled) sendPushToUser(userId, title, message);
     });
   });
 }
 
-app.get('/api/notifications', verifyToken, (req, res) => {
-  db.all('SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', [req.user.id], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows || []);
-  });
-});
 
-app.patch('/api/notifications/:id/read', verifyToken, (req, res) => {
-  db.run('UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?', [req.params.id, req.user.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ id: req.params.id, read: true });
-  });
-});
 
-app.patch('/api/notifications/read-all', verifyToken, (req, res) => {
-  db.run('UPDATE notifications SET read = 1 WHERE user_id = ?', [req.user.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ ok: true });
-  });
-});
 
 // ─── Push notifications (lembrete de agendamento) ─────────────────────────────
 
-app.get('/api/push/vapid-public-key', (req, res) => {
-  res.json({ publicKey: VAPID_PUBLIC_KEY });
-});
 
-app.post('/api/push/subscribe', verifyToken, (req, res) => {
-  const { endpoint, keys } = req.body || {};
-  if (!endpoint || !keys?.p256dh || !keys?.auth) {
-    return res.status(400).json({ error: t(reqLang(req), 'Assinatura de push inválida') });
-  }
-  db.run(
-    `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?)
-     ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`,
-    [req.user.id, endpoint, keys.p256dh, keys.auth],
-    (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ message: t(reqLang(req), 'Inscrito para notificações') });
-    }
-  );
-});
 
-app.delete('/api/push/subscribe', verifyToken, (req, res) => {
-  const { endpoint } = req.body || {};
-  if (!endpoint) return res.status(400).json({ error: t(reqLang(req), 'Endpoint obrigatório') });
-  db.run('DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?', [endpoint, req.user.id], (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ message: t(reqLang(req), 'Inscrição removida') });
-  });
-});
 
-// Verifica a cada minuto agendamentos que entram na janela de 1h e envia push aos clientes
-function sendAppointmentReminders() {
-  isSettingEnabled('notif_reminder', (enabled) => {
-    if (!enabled) return;
-    db.all(
-      `SELECT a.id, a.client_id, a.appointment_date, a.appointment_time, s.name as service_name, b.name as barber_name
-       FROM appointments a
-       JOIN services s ON a.service_id = s.id
-       JOIN users b ON a.barber_id = b.id
-       WHERE a.status IN ('pending', 'confirmed') AND a.reminded_at IS NULL`,
-      [],
-      (err, rows) => {
-        if (err || !rows) return;
-        const now = new Date();
-        rows.forEach(apt => {
-          const aptDateTime = new Date(`${apt.appointment_date}T${apt.appointment_time}`);
-          const diffMin = (aptDateTime - now) / 60000;
-          if (diffMin > 65 || diffMin < 55) return;
 
-          db.run('UPDATE appointments SET reminded_at = CURRENT_TIMESTAMP WHERE id = ?', [apt.id]);
-          db.get('SELECT language FROM users WHERE id = ?', [apt.client_id], (langErr, userRow) => {
-            const lang = (userRow && userRow.language) || 'pt-BR';
-            db.all('SELECT * FROM push_subscriptions WHERE user_id = ?', [apt.client_id], (err, subs) => {
-              if (err || !subs) return;
-              const payload = JSON.stringify({
-                title: t(lang, 'Seu horário começa em 1 hora!'),
-                body: t(lang, '{servico} com {barbeiro} às {hora}. Confirme sua presença no app.',
-                  { servico: apt.service_name, barbeiro: apt.barber_name, hora: apt.appointment_time }),
-                appointmentId: apt.id,
-              });
-              subs.forEach(sub => {
-                const subscription = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
-                webpush.sendNotification(subscription, payload).catch(err => {
-                  if (err.statusCode === 404 || err.statusCode === 410) {
-                    db.run('DELETE FROM push_subscriptions WHERE endpoint = ?', [sub.endpoint]);
-                  }
-                });
-              });
-            });
-          });
-        });
-      }
-    );
-  });
-}
-setInterval(sendAppointmentReminders, 60 * 1000);
-
-// Verifica diariamente aniversariantes e envia notificação (uma vez por ano por usuário)
-function checkBirthdays() {
-  isSettingEnabled('notif_birthday', (enabled) => {
-    if (!enabled) return;
-    const now = new Date();
-    const mmdd = String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-    const year = now.getFullYear();
-    db.all(
-      `SELECT id, name, birth_date FROM users
-       WHERE birth_date IS NOT NULL AND birth_date != ''
-       AND (last_birthday_notif_year IS NULL OR last_birthday_notif_year != ?)`,
-      [year],
-      (err, rows) => {
-        if (err || !rows) return;
-        rows.forEach(u => {
-          if ((u.birth_date || '').slice(5, 10) !== mmdd) return;
-          criarNotificacao(u.id, 'Feliz aniversário!',
-            'Parabéns, {nome}! A equipe BarberPro deseja um ótimo dia. Que tal comemorar com um corte novo?', 'success',
-            { nome: (u.name || '').split(' ')[0] });
-          db.run('UPDATE users SET last_birthday_notif_year = ? WHERE id = ?', [year, u.id]);
-        });
-      }
-    );
-  });
-}
-setInterval(checkBirthdays, 60 * 60 * 1000);
-checkBirthdays();
 
 // ─── Módulo Açougue (dashboard financeiro/fiscal, role 'acougue') ────────────
-// Isolado do restante da API: nenhuma rota abaixo é acessível por client/barber/admin.
+// Todo o sistema roda sob o perfil 'acougue'.
 
 const acougueOnly = [verifyToken, verifyRole(['acougue'])];
 
@@ -4371,9 +2980,6 @@ app.get('/api/health', (req, res) => {
 
 // ─── SPA fallback — serve index.html para qualquer rota não-API ──────────────
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -4420,7 +3026,7 @@ const generateTimes = (workingHours, bookedRanges, duration = 30, date = null) =
 initDatabase()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`\n🚀 CS Barber v2.1 rodando em http://localhost:${PORT}\n`);
+      console.log(`\n🚀 Rei das Carnes rodando em http://localhost:${PORT}\n`);
       logEvent('INFO', 'Sistema iniciado');
     });
   })

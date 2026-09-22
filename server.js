@@ -16,7 +16,6 @@ const crypto = require('crypto');
 const webpush = require('web-push');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
-const { t, reqLang, SUPPORTED_LANGS, weekdayName } = require('./i18n-server');
 const focusNfe = require('./focus-nfe');
 const scaleBarcode = require('./scale-barcode');
 const nfeXml = require('./nfe-xml');
@@ -178,7 +177,6 @@ async function initDatabase() {
     document TEXT UNIQUE,
     address TEXT,
     photo_url TEXT,
-    is_vip INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`);
 
@@ -578,7 +576,6 @@ async function initDatabase() {
   // Migrações (colunas adicionadas depois do schema inicial) — idempotentes via IF NOT EXISTS,
   // sem precisar do try/catch de "duplicate column" que o sqlite3 exigia.
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'dark'");
-  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'pt-BR'");
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password INTEGER DEFAULT 0');
 
   // Seed inicial - só insere se não existir
@@ -685,18 +682,18 @@ async function initDatabase() {
 
 const verifyToken = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: t(reqLang(req), 'Token não fornecido') });
+  if (!token) return res.status(401).json({ error: 'Token não fornecido' });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
   } catch {
-    res.status(401).json({ error: t(reqLang(req), 'Token inválido') });
+    res.status(401).json({ error: 'Token inválido' });
   }
 };
 
 const verifyRole = (roles) => (req, res, next) => {
   if (!roles.includes(req.user.role)) {
-    return res.status(403).json({ error: t(reqLang(req), 'Acesso negado') });
+    return res.status(403).json({ error: 'Acesso negado' });
   }
   next();
 };
@@ -708,7 +705,7 @@ const loginLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: (req, res) => ({ error: t(reqLang(req), 'Muitas tentativas de login. Tente novamente em alguns minutos.') }),
+  message: (req, res) => ({ error: 'Muitas tentativas de login. Tente novamente em alguns minutos.' }),
   skipSuccessfulRequests: true,
 });
 
@@ -717,18 +714,18 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
   db.get('SELECT * FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))', [email || ''], (err, user) => {
     if (err || !user) {
       logEvent('WARN', 'Tentativa de login inválida ({email})', { email: email || '—' });
-      return res.status(401).json({ error: t(reqLang(req), 'Usuário não encontrado') });
+      return res.status(401).json({ error: 'Usuário não encontrado' });
     }
     if (!bcrypt.compareSync(password, user.password)) {
       logEvent('WARN', 'Tentativa de login inválida ({email})', { email });
-      return res.status(401).json({ error: t(reqLang(req), 'Senha incorreta') });
+      return res.status(401).json({ error: 'Senha incorreta' });
     }
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name, language: user.language || 'pt-BR' },
+      { id: user.id, email: user.email, role: user.role, name: user.name },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, phone: user.phone, theme: user.theme || 'dark', language: user.language || 'pt-BR', must_change_password: !!user.must_change_password } });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, phone: user.phone, theme: user.theme || 'dark', must_change_password: !!user.must_change_password } });
   });
 });
 
@@ -736,19 +733,19 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
 app.post('/api/auth/reset-password', (req, res) => {
   const { email, newPassword } = req.body;
   if (!email || !newPassword) {
-    return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
+    return res.status(400).json({ error: 'Campos obrigatórios faltando' });
   }
   if (newPassword.length < 8) {
-    return res.status(400).json({ error: t(reqLang(req), 'A senha deve ter no mínimo 8 caracteres') });
+    return res.status(400).json({ error: 'A senha deve ter no mínimo 8 caracteres' });
   }
   db.get('SELECT * FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))', [email], (err, user) => {
     if (err || !user) {
-      return res.status(404).json({ error: t(reqLang(req), 'Nenhuma conta encontrada com esse e-mail') });
+      return res.status(404).json({ error: 'Nenhuma conta encontrada com esse e-mail' });
     }
     const hashedPassword = bcrypt.hashSync(newPassword, 10);
     db.run('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, user.id], (err2) => {
-      if (err2) return res.status(500).json({ error: t(reqLang(req), 'Erro ao redefinir senha') });
-      res.json({ message: t(reqLang(req), 'Senha redefinida com sucesso') });
+      if (err2) return res.status(500).json({ error: 'Erro ao redefinir senha' });
+      res.json({ message: 'Senha redefinida com sucesso' });
     });
   });
 });
@@ -756,7 +753,7 @@ app.post('/api/auth/reset-password', (req, res) => {
 app.put('/api/auth/profile', verifyToken, (req, res) => {
   const { name, email, phone } = req.body;
   if (!name || !email) {
-    return res.status(400).json({ error: t(reqLang(req), 'Nome e e-mail são obrigatórios') });
+    return res.status(400).json({ error: 'Nome e e-mail são obrigatórios' });
   }
   const normalizedEmail = email.trim().toLowerCase();
   const phoneDigits = phone ? phone.replace(/\D/g, '') : null;
@@ -767,8 +764,8 @@ app.put('/api/auth/profile', verifyToken, (req, res) => {
       [name, normalizedEmail, phone || null, req.user.id],
       function(err) {
         if (err) {
-          if (err.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'Email já cadastrado') });
-          return res.status(500).json({ error: t(reqLang(req), 'Erro ao atualizar perfil') });
+          if (err.code === '23505') return res.status(409).json({ error: 'Email já cadastrado' });
+          return res.status(500).json({ error: 'Erro ao atualizar perfil' });
         }
         res.json({ name, email: normalizedEmail, phone: phone || null });
       }
@@ -779,14 +776,14 @@ app.put('/api/auth/profile', verifyToken, (req, res) => {
     'SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND id != ?',
     [normalizedEmail, req.user.id],
     (err, existingEmail) => {
-      if (existingEmail) return res.status(409).json({ error: t(reqLang(req), 'Email já cadastrado') });
+      if (existingEmail) return res.status(409).json({ error: 'Email já cadastrado' });
       if (!phoneDigits) return applyUpdate();
 
       db.get(
         `SELECT id FROM users WHERE id != ? AND phone IS NOT NULL AND REPLACE(REPLACE(REPLACE(REPLACE(phone,'(',''),')',''),'-',''),' ','') = ?`,
         [req.user.id, phoneDigits],
         (err, existingPhone) => {
-          if (existingPhone) return res.status(409).json({ error: t(reqLang(req), 'Telefone já cadastrado') });
+          if (existingPhone) return res.status(409).json({ error: 'Telefone já cadastrado' });
           applyUpdate();
         }
       );
@@ -797,20 +794,20 @@ app.put('/api/auth/profile', verifyToken, (req, res) => {
 app.put('/api/auth/password', verifyToken, (req, res) => {
   const { old_password, new_password } = req.body;
   if (!old_password || !new_password) {
-    return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
+    return res.status(400).json({ error: 'Campos obrigatórios faltando' });
   }
   if (new_password.length < 8) {
-    return res.status(400).json({ error: t(reqLang(req), 'A nova senha deve ter no mínimo 8 caracteres') });
+    return res.status(400).json({ error: 'A nova senha deve ter no mínimo 8 caracteres' });
   }
   db.get('SELECT * FROM users WHERE id = ?', [req.user.id], (err, user) => {
-    if (err || !user) return res.status(404).json({ error: t(reqLang(req), 'Usuário não encontrado') });
+    if (err || !user) return res.status(404).json({ error: 'Usuário não encontrado' });
     if (!bcrypt.compareSync(old_password, user.password)) {
-      return res.status(401).json({ error: t(reqLang(req), 'Senha atual incorreta') });
+      return res.status(401).json({ error: 'Senha atual incorreta' });
     }
     const hashedPassword = bcrypt.hashSync(new_password, 10);
     db.run('UPDATE users SET password = ?, must_change_password = 0 WHERE id = ?', [hashedPassword, req.user.id], (err2) => {
-      if (err2) return res.status(500).json({ error: t(reqLang(req), 'Erro ao alterar senha') });
-      res.json({ message: t(reqLang(req), 'Senha alterada com sucesso') });
+      if (err2) return res.status(500).json({ error: 'Erro ao alterar senha' });
+      res.json({ message: 'Senha alterada com sucesso' });
     });
   });
 });
@@ -905,7 +902,7 @@ app.put('/api/auth/password', verifyToken, (req, res) => {
 
 app.get('/api/me', verifyToken, (req, res) => {
   db.get('SELECT id, name, email, phone, role, document, photo_url, theme, created_at FROM users WHERE id = ?', [req.user.id], (err, user) => {
-    if (err || !user) return res.status(404).json({ error: t(reqLang(req), 'Usuário não encontrado') });
+    if (err || !user) return res.status(404).json({ error: 'Usuário não encontrado' });
     res.json(user);
   });
 });
@@ -917,52 +914,16 @@ app.get('/api/me', verifyToken, (req, res) => {
 
 app.patch('/api/me', verifyToken, async (req, res) => {
   try {
-    const current = await db.get('SELECT * FROM users WHERE id = ?', [req.user.id]);
-    if (!current) return res.status(404).json({ error: t(reqLang(req), 'Usuário não encontrado') });
-    const name = req.body.name ?? current.name;
-    const phone = req.body.phone ?? current.phone;
-    const address = req.body.address ?? current.address;
-    const document = req.body.document !== undefined ? (req.body.document || null) : current.document;
-    const specialty = req.body.specialty ?? current.specialty;
-    const theme = req.body.theme === 'light' || req.body.theme === 'dark' ? req.body.theme : current.theme;
-    const language = SUPPORTED_LANGS.includes(req.body.language) ? req.body.language : current.language;
-    const birth_date = req.body.birth_date !== undefined ? req.body.birth_date : current.birth_date;
-    const gender = req.body.gender !== undefined ? req.body.gender : current.gender;
-    const service_preferences = req.body.service_preferences !== undefined ? JSON.stringify(req.body.service_preferences) : current.service_preferences;
-    const bio = req.body.bio !== undefined ? req.body.bio : current.bio;
-    const intro_video_url = req.body.intro_video_url !== undefined ? req.body.intro_video_url : current.intro_video_url;
-    const instagram = req.body.instagram !== undefined ? req.body.instagram : current.instagram;
+    const atual = await db.get('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    if (!atual) return res.status(404).json({ error: 'Usuário não encontrado' });
 
-    // Foto de perfil: base64 novo sobe pro S3 (ou fica como está, sem S3 configurado em dev);
-    // a antiga só é apagada do bucket depois que a nova já está salva.
-    let photo_url = current.photo_url;
-    if (req.body.photo_url === null) {
-      await deletePhotoFromS3(current.photo_url);
-      photo_url = null;
-    } else if (req.body.photo_url !== undefined && req.body.photo_url !== current.photo_url) {
-      photo_url = await uploadPhotoToS3(req.body.photo_url, 'avatars');
-      if (photo_url !== current.photo_url) await deletePhotoFromS3(current.photo_url);
-    }
+    const name = req.body.name ?? atual.name;
+    const phone = req.body.phone ?? atual.phone;
+    const theme = (req.body.theme === 'light' || req.body.theme === 'dark') ? req.body.theme : atual.theme;
 
-    // Portfólio (barbeiro): cada foto nova em base64 sobe pro S3; fotos removidas da lista são
-    // apagadas do bucket.
-    let portfolio_photos = current.portfolio_photos;
-    if (req.body.portfolio_photos !== undefined) {
-      const oldUrls = current.portfolio_photos ? JSON.parse(current.portfolio_photos) : [];
-      const newUrls = await Promise.all((req.body.portfolio_photos || []).map(p => uploadPhotoToS3(p, 'portfolio')));
-      await Promise.all(oldUrls.filter(u => !newUrls.includes(u)).map(deletePhotoFromS3));
-      portfolio_photos = JSON.stringify(newUrls);
-    }
-
-    await db.run(
-      'UPDATE users SET name=?, phone=?, address=?, document=?, specialty=?, photo_url=?, theme=?, language=?, birth_date=?, gender=?, service_preferences=?, bio=?, portfolio_photos=?, intro_video_url=?, instagram=? WHERE id=?',
-      [name, phone, address, document, specialty, photo_url, theme, language, birth_date, gender, service_preferences, bio, portfolio_photos, intro_video_url, instagram, req.user.id]
-    );
-    res.json({ message: t(reqLang(req), 'Perfil atualizado'), name, phone, address, document, specialty, photo_url, theme, language, birth_date, gender, service_preferences, bio, portfolio_photos, intro_video_url, instagram });
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: t(reqLang(req), 'Este CPF já está cadastrado em outra conta.') });
-    res.status(500).json({ error: err.message });
-  }
+    await db.run('UPDATE users SET name = ?, phone = ?, theme = ? WHERE id = ?', [name, phone, theme, req.user.id]);
+    res.json({ id: req.user.id, name, phone, theme });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Notificações (in-app + push) ──────────────────────────────────────────────
@@ -977,24 +938,6 @@ function isSettingEnabled(key, cb) {
   });
 }
 
-// Cria notificação in-app (histórico) e dispara push em paralelo, se o canal push estiver habilitado.
-// `titleKey`/`messageTemplate` são os textos originais em português (chaves de tradução);
-// `params` alimenta a interpolação e é resolvido no idioma do DESTINATÁRIO (não de quem disparou
-// a notificação), buscado na hora a partir da coluna users.language.
-function criarNotificacao(userId, titleKey, messageTemplate, type = 'info', params = {}) {
-  db.get('SELECT language FROM users WHERE id = ?', [userId], (err, row) => {
-    const lang = (row && row.language) || 'pt-BR';
-    const resolvedParams = { ...params };
-    if (resolvedParams.diaSemanaIdx !== undefined) {
-      resolvedParams.dia = weekdayName(lang, resolvedParams.diaSemanaIdx);
-    }
-    const title = t(lang, titleKey, resolvedParams);
-    const message = t(lang, messageTemplate, resolvedParams);
-    db.run('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)', [userId, title, message, type]);
-    isSettingEnabled('channel_push', (enabled) => {
-    });
-  });
-}
 
 
 
@@ -1212,7 +1155,7 @@ app.get('/api/acougue/products', ...acougueOnly, async (req, res) => {
 app.get('/api/acougue/products/barcode/:code', ...acougueOnly, async (req, res) => {
   try {
     const product = await db.get('SELECT * FROM acougue_products WHERE barcode = ? AND active = 1', [req.params.code]);
-    if (!product) return res.status(404).json({ error: t(reqLang(req), 'Produto não encontrado para este código de barras') });
+    if (!product) return res.status(404).json({ error: 'Produto não encontrado para este código de barras' });
     res.json(product);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1224,7 +1167,6 @@ app.get('/api/acougue/products/barcode/:code', ...acougueOnly, async (req, res) 
 // Devolve sempre { product, quantity, scan } para o front não precisar saber qual dos dois
 // tipos de código foi lido.
 app.get('/api/acougue/products/scan/:code', ...acougueOnly, async (req, res) => {
-  const lang = reqLang(req);
   const code = String(req.params.code || '').trim();
   try {
     const settings = await getAcougueSettingsMap();
@@ -1241,7 +1183,7 @@ app.get('/api/acougue/products/scan/:code', ...acougueOnly, async (req, res) => 
     if (!parsed) {
       // Não é etiqueta de balança: EAN de fábrica ou código digitado à mão.
       const product = await db.get('SELECT * FROM acougue_products WHERE barcode = ? AND active = 1', [code]);
-      if (!product) return res.status(404).json({ error: t(lang, 'Produto não encontrado para este código de barras') });
+      if (!product) return res.status(404).json({ error: 'Produto não encontrado para este código de barras' });
       return res.json({ product, quantity: 1, scan: { type: 'barcode', barcode: code } });
     }
 
@@ -1277,7 +1219,7 @@ app.get('/api/acougue/products/scan/:code', ...acougueOnly, async (req, res) => 
 app.post('/api/acougue/products', ...acougueOnly, async (req, res) => {
   const { barcode, scale_code, name, category, unit, price, cost_price, stock_qty } = req.body;
   const fiscal = ACOUGUE_FISCAL_FIELDS.map(f => req.body[f] ?? null);
-  if (!name || price === undefined) return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
+  if (!name || price === undefined) return res.status(400).json({ error: 'Campos obrigatórios faltando' });
   // PLU é sempre comparado sem zeros à esquerda (a balança preenche com zeros, o cadastro não).
   const plu = scale_code ? String(Number(scale_code)) : null;
   if (scale_code && !/^\d+$/.test(String(scale_code).trim())) {
@@ -1299,7 +1241,7 @@ app.post('/api/acougue/products', ...acougueOnly, async (req, res) => {
 app.patch('/api/acougue/products/:id', ...acougueOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_products WHERE id = ?', [req.params.id]);
-    if (!current) return res.status(404).json({ error: t(reqLang(req), 'Produto não encontrado') });
+    if (!current) return res.status(404).json({ error: 'Produto não encontrado' });
     const next = {};
     ['barcode', 'scale_code', 'name', 'category', 'unit', 'price', 'cost_price', 'stock_qty', ...ACOUGUE_FISCAL_FIELDS]
       .forEach(f => { next[f] = req.body[f] !== undefined ? req.body[f] : current[f]; });
@@ -1344,7 +1286,7 @@ app.get('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
 app.post('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
   const { supplier_name, supplier_document, animal_type, weight_kg, unit_price, entry_date, notes } = req.body;
   if (!supplier_name || !weight_kg || !unit_price || !entry_date) {
-    return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
+    return res.status(400).json({ error: 'Campos obrigatórios faltando' });
   }
   const total_value = round2(Number(weight_kg) * Number(unit_price));
   try {
@@ -1359,7 +1301,7 @@ app.post('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
 app.patch('/api/acougue/carcass-entries/:id', ...acougueOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_carcass_entries WHERE id = ?', [req.params.id]);
-    if (!current) return res.status(404).json({ error: t(reqLang(req), 'Registro não encontrado') });
+    if (!current) return res.status(404).json({ error: 'Registro não encontrado' });
     const next = {};
     ['supplier_name', 'supplier_document', 'animal_type', 'weight_kg', 'unit_price', 'entry_date', 'notes'].forEach(f => { next[f] = req.body[f] !== undefined ? req.body[f] : current[f]; });
     next.total_value = round2(Number(next.weight_kg) * Number(next.unit_price));
@@ -1396,7 +1338,7 @@ app.get('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
 app.post('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
   const { carcass_entry_id, product_id, cut_name, weight_kg, unit_price, output_date, destination, notes } = req.body;
   if (!cut_name || !weight_kg || !unit_price || !output_date) {
-    return res.status(400).json({ error: t(reqLang(req), 'Campos obrigatórios faltando') });
+    return res.status(400).json({ error: 'Campos obrigatórios faltando' });
   }
   const dest = ['estoque', 'venda_direta', 'perda'].includes(destination) ? destination : 'estoque';
   const total_value = round2(Number(weight_kg) * Number(unit_price));
@@ -1415,7 +1357,7 @@ app.post('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
 app.patch('/api/acougue/cuts/:id', ...acougueOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_cuts WHERE id = ?', [req.params.id]);
-    if (!current) return res.status(404).json({ error: t(reqLang(req), 'Registro não encontrado') });
+    if (!current) return res.status(404).json({ error: 'Registro não encontrado' });
     const next = {};
     ['carcass_entry_id', 'product_id', 'cut_name', 'weight_kg', 'unit_price', 'output_date', 'destination', 'notes'].forEach(f => { next[f] = req.body[f] !== undefined ? req.body[f] : current[f]; });
     next.total_value = round2(Number(next.weight_kg) * Number(next.unit_price));
@@ -1448,7 +1390,7 @@ app.get('/api/acougue/sales', ...acougueOnly, async (req, res) => {
 app.get('/api/acougue/sales/:id', ...acougueOnly, async (req, res) => {
   try {
     const sale = await db.get('SELECT * FROM acougue_sales WHERE id = ?', [req.params.id]);
-    if (!sale) return res.status(404).json({ error: t(reqLang(req), 'Venda não encontrada') });
+    if (!sale) return res.status(404).json({ error: 'Venda não encontrada' });
     const items = await db.all('SELECT * FROM acougue_sale_items WHERE sale_id = ?', [req.params.id]);
     res.json({ ...sale, items });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1460,7 +1402,7 @@ app.get('/api/acougue/sales/:id', ...acougueOnly, async (req, res) => {
 app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
   const { items, payment_method, desconto, acrescimo, pagamentos, customer_id, vendedor_id } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: t(reqLang(req), 'Informe ao menos um item') });
+    return res.status(400).json({ error: 'Informe ao menos um item' });
   }
   const descontoVenda = Number(desconto) || 0;
   const acrescimoVenda = Number(acrescimo) || 0;
@@ -1474,13 +1416,13 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
     let total = 0;
     for (const it of items) {
       const quantity = Number(it.quantity);
-      if (!quantity || quantity <= 0) throw Object.assign(new Error(t(reqLang(req), 'Quantidade inválida em um dos itens')), { code: 'BAD_INPUT' });
+      if (!quantity || quantity <= 0) throw Object.assign(new Error('Quantidade inválida em um dos itens'), { code: 'BAD_INPUT' });
       const { rows } = await client.query(
         it.barcode ? 'SELECT * FROM acougue_products WHERE barcode = $1 AND active = 1' : 'SELECT * FROM acougue_products WHERE id = $1 AND active = 1',
         [it.barcode || it.product_id]
       );
       const product = rows[0];
-      if (!product) throw Object.assign(new Error(t(reqLang(req), 'Produto não encontrado: {code}', { code: it.barcode || it.product_id })), { code: 'BAD_INPUT' });
+      if (!product) throw Object.assign(new Error(`Produto não encontrado: ${it.barcode || it.product_id}`), { code: 'BAD_INPUT' });
       const descontoItem = Number(it.desconto) || 0;
       const bruto = round2(product.price * quantity);
       if (descontoItem < 0 || descontoItem > bruto) {
@@ -1571,10 +1513,9 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
 // mesma transação, uma indisponibilidade da SEFAZ impediria o açougue de vender — que é
 // exatamente o oposto do que o balcão precisa.
 app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
-  const lang = reqLang(req);
   try {
     const sale = await db.get('SELECT * FROM acougue_sales WHERE id = ?', [req.params.id]);
-    if (!sale) return res.status(404).json({ error: t(lang, 'Venda não encontrada') });
+    if (!sale) return res.status(404).json({ error: 'Venda não encontrada' });
     if (sale.status === 'cancelada') return res.status(409).json({ error: 'Esta venda está cancelada — não é possível emitir nota.' });
 
     // 'rascunho' entra na trava junto com autorizada/processando: sem o token da Focus toda
@@ -1606,7 +1547,7 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
 
     const settings = await getAcougueSettingsMap();
     if (!settings.cnpj || !settings.ie) {
-      return res.status(422).json({ error: t(lang, 'Preencha o CNPJ e a Inscrição Estadual do açougue em Configurações antes de emitir notas.') });
+      return res.status(422).json({ error: 'Preencha o CNPJ e a Inscrição Estadual do açougue em Configurações antes de emitir notas.' });
     }
 
     const payload = focusNfe.buildNFCePayload({
@@ -1698,8 +1639,8 @@ app.post('/api/acougue/sales/:id/cancel', ...acougueOnly, async (req, res) => {
   try {
     await client.query('BEGIN');
     const { rows: [sale] } = await client.query('SELECT * FROM acougue_sales WHERE id = $1', [req.params.id]);
-    if (!sale) { await client.query('ROLLBACK'); return res.status(404).json({ error: t(reqLang(req), 'Venda não encontrada') }); }
-    if (sale.status === 'cancelada') { await client.query('ROLLBACK'); return res.status(409).json({ error: t(reqLang(req), 'Venda já está cancelada') }); }
+    if (!sale) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda não encontrada' }); }
+    if (sale.status === 'cancelada') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Venda já está cancelada' }); }
     const { rows: saleItems } = await client.query('SELECT * FROM acougue_sale_items WHERE sale_id = $1', [sale.id]);
     for (const it of saleItems) {
       if (it.product_id) {
@@ -1738,7 +1679,7 @@ app.get('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
 app.post('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
   const { type, ref_type, ref_id, total_value, itens, destinatario, natureza_operacao } = req.body;
   if (!type || !['entrada', 'saida'].includes(type) || !total_value) {
-    return res.status(400).json({ error: t(reqLang(req), 'Tipo (entrada/saida) e valor total são obrigatórios') });
+    return res.status(400).json({ error: 'Tipo (entrada/saida) e valor total são obrigatórios' });
   }
   try {
     const { rows } = await db.run(
@@ -1750,14 +1691,14 @@ app.post('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
     if (!focusNfe.isFocusConfigured()) {
       return res.status(201).json({
         id: invoiceId, type, ref_type, ref_id, total_value, status: 'rascunho',
-        warning: t(reqLang(req), 'Focus NFe não configurado — esta nota fica como rascunho local até você configurar FOCUS_NFE_TOKEN no servidor (veja .env.example).'),
+        warning: 'Focus NFe não configurado — esta nota fica como rascunho local até você configurar FOCUS_NFE_TOKEN no servidor (veja .env.example).',
       });
     }
 
     const settings = await getAcougueSettingsMap();
     if (!settings.cnpj || !settings.ie) {
       await db.run("UPDATE acougue_invoices SET status = 'erro', error_message = ? WHERE id = ?", ['CNPJ/IE do açougue não configurados', invoiceId]);
-      return res.status(422).json({ id: invoiceId, status: 'erro', error: t(reqLang(req), 'Preencha o CNPJ e a Inscrição Estadual do açougue em Configurações antes de emitir notas.') });
+      return res.status(422).json({ id: invoiceId, status: 'erro', error: 'Preencha o CNPJ e a Inscrição Estadual do açougue em Configurações antes de emitir notas.' });
     }
 
     const payload = focusNfe.buildNFePayload({
@@ -1788,7 +1729,7 @@ app.post('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
 app.get('/api/acougue/nfe/:id', ...acougueOnly, async (req, res) => {
   try {
     const invoice = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
-    if (!invoice) return res.status(404).json({ error: t(reqLang(req), 'Nota não encontrada') });
+    if (!invoice) return res.status(404).json({ error: 'Nota não encontrada' });
     if (focusNfe.isFocusConfigured() && invoice.focus_ref && invoice.status === 'processando') {
       try {
         const result = await focusNfe.consultNFe(invoice.focus_ref);
@@ -1808,13 +1749,13 @@ app.post('/api/acougue/nfe/:id/cancel', ...acougueOnly, async (req, res) => {
   const { justificativa } = req.body;
   try {
     const invoice = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
-    if (!invoice) return res.status(404).json({ error: t(reqLang(req), 'Nota não encontrada') });
+    if (!invoice) return res.status(404).json({ error: 'Nota não encontrada' });
     if (invoice.status === 'autorizada' && focusNfe.isFocusConfigured() && invoice.focus_ref) {
       if (!justificativa || justificativa.length < 15) {
-        return res.status(400).json({ error: t(reqLang(req), 'A justificativa de cancelamento deve ter ao menos 15 caracteres (exigência da SEFAZ)') });
+        return res.status(400).json({ error: 'A justificativa de cancelamento deve ter ao menos 15 caracteres (exigência da SEFAZ)' });
       }
       const result = await focusNfe.cancelNFe(invoice.focus_ref, justificativa);
-      if (!result.ok) return res.status(502).json({ error: result.data?.mensagem_sefaz || result.data?.mensagem || t(reqLang(req), 'Falha ao cancelar na SEFAZ') });
+      if (!result.ok) return res.status(502).json({ error: result.data?.mensagem_sefaz || result.data?.mensagem || 'Falha ao cancelar na SEFAZ' });
     }
     await db.run("UPDATE acougue_invoices SET status = 'cancelada', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.id]);
     res.json({ id: Number(req.params.id), status: 'cancelada' });
@@ -1841,10 +1782,10 @@ app.get('/api/acougue/taxes/periods', ...acougueOnly, async (req, res) => {
 
 app.post('/api/acougue/taxes/periods/close', ...acougueOnly, async (req, res) => {
   const { month, year } = req.body;
-  if (!month || !year) return res.status(400).json({ error: t(reqLang(req), 'Informe mês e ano') });
+  if (!month || !year) return res.status(400).json({ error: 'Informe mês e ano' });
   try {
     const existing = await db.get('SELECT id FROM acougue_tax_periods WHERE ref_month = ? AND ref_year = ?', [month, year]);
-    if (existing) return res.status(409).json({ error: t(reqLang(req), 'Este período já foi fechado') });
+    if (existing) return res.status(409).json({ error: 'Este período já foi fechado' });
     const apuracao = await calcApuracao(Number(month), Number(year));
     const { rows } = await db.run(
       'INSERT INTO acougue_tax_periods (ref_month, ref_year, pis_credit, pis_debit, pis_due, cofins_credit, cofins_debit, cofins_due, closed_by) VALUES (?,?,?,?,?,?,?,?,?)',
@@ -2893,7 +2834,7 @@ app.get('/api/acougue/yield-cuts', ...acougueOnly, async (req, res) => {
 app.post('/api/acougue/yield-cuts', ...acougueOnly, async (req, res) => {
   const { name, section, pct_of_carcass } = req.body;
   if (!name || !section || pct_of_carcass === undefined) {
-    return res.status(400).json({ error: t(reqLang(req), 'Nome, seção e percentual são obrigatórios') });
+    return res.status(400).json({ error: 'Nome, seção e percentual são obrigatórios' });
   }
   try {
     const { rows: [{ maxOrder }] } = await pool.query('SELECT COALESCE(MAX(display_order), 0) as "maxOrder" FROM acougue_yield_cuts');
@@ -2908,7 +2849,7 @@ app.post('/api/acougue/yield-cuts', ...acougueOnly, async (req, res) => {
 app.patch('/api/acougue/yield-cuts/:id', ...acougueOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_yield_cuts WHERE id = ?', [req.params.id]);
-    if (!current) return res.status(404).json({ error: t(reqLang(req), 'Corte não encontrado') });
+    if (!current) return res.status(404).json({ error: 'Corte não encontrado' });
     const next = {};
     ['name', 'section', 'pct_of_carcass', 'display_order'].forEach(f => { next[f] = req.body[f] !== undefined ? req.body[f] : current[f]; });
     await db.run(

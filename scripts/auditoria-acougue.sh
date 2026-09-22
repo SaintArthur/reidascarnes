@@ -50,6 +50,19 @@ check "mês inválido"               400 "$(st "$API/api/acougue/sped/efd-icms-i
 check "período sem dados"          200 "$(st "$API/api/acougue/sped/efd-icms-ipi?month=1&year=2020" -H "$H")"
 check "apuração PIS/COFINS"        200 "$(st "$API/api/acougue/taxes/apuracao?month=9&year=2026" -H "$H")"
 
+echo "── GAVETA DO CAIXA ──"
+check "sangria sem motivo"         400 "$(st -X POST $API/api/acougue/cash-session/movimento -H "$H" -H "$J" -d '{"tipo":"sangria","valor":10}')"
+check "movimento tipo inválido"    400 "$(st -X POST $API/api/acougue/cash-session/movimento -H "$H" -H "$J" -d '{"tipo":"roubo","valor":10,"motivo":"teste do sistema"}')"
+check "movimento valor zero"       400 "$(st -X POST $API/api/acougue/cash-session/movimento -H "$H" -H "$J" -d '{"tipo":"sangria","valor":0,"motivo":"teste do sistema"}')"
+check "abrir caixa já aberto"      409 "$(st -X POST $API/api/acougue/cash-session/abrir -H "$H" -H "$J" -d '{"valor_abertura":100}')"
+check "situação da gaveta"         200 "$(st "$API/api/acougue/cash-session" -H "$H")"
+check "histórico de fechamentos"   200 "$(st "$API/api/acougue/cash-session/historico" -H "$H")"
+
+echo "── DESCONTO E PAGAMENTO ──"
+check "desconto negativo"          400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"desconto\":-5}")"
+check "desconto maior que a venda" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"desconto\":999999}")"
+check "pagamentos não somam total" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"pagamentos\":[{\"forma\":\"pix\",\"valor\":1}]}")"
+
 echo "── SEGURANÇA ──"
 check "sem token"                  401 "$(st "$API/api/acougue/products")"
 check "token inválido"             401 "$(st "$API/api/acougue/products" -H 'Authorization: Bearer xxx')"

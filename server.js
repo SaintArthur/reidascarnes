@@ -526,6 +526,54 @@ async function initDatabase() {
     cofins_valor REAL DEFAULT 0
   )`);
 
+  // ─── Caixa: sessão, sangria e suprimento ───────────────────────────────────
+  // Sem controle de gaveta não existe conferência: ninguém sabe se o dinheiro que está lá
+  // bate com o que foi vendido. A sessão amarra as vendas a um turno e a um operador, e é o
+  // que permite fechar o dia apontando sobra ou falta em vez de descobrir a diferença no mês.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_cash_sessions (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    aberto_por INTEGER REFERENCES users(id),
+    aberto_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    valor_abertura REAL NOT NULL DEFAULT 0,
+    fechado_por INTEGER REFERENCES users(id),
+    fechado_em TIMESTAMP,
+    -- Valor contado na gaveta no fechamento. A diferença para o esperado é o que interessa.
+    valor_contado REAL,
+    diferenca REAL,
+    observacao TEXT
+  )`);
+  // Só uma sessão aberta por vez: duas gavetas abertas ao mesmo tempo tornam impossível
+  // dizer a qual turno uma venda pertence.
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_uma_sessao_aberta
+    ON acougue_cash_sessions((fechado_em IS NULL)) WHERE fechado_em IS NULL`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_cash_movements (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES acougue_cash_sessions(id) ON DELETE CASCADE,
+    tipo TEXT NOT NULL,          -- 'sangria' (retira) | 'suprimento' (coloca)
+    valor REAL NOT NULL,
+    motivo TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Pagamentos da venda em linhas separadas: uma venda pode ser paga metade em dinheiro e
+  // metade no cartão, e a NFC-e exige cada forma discriminada no XML.
+  await pool.query(`CREATE TABLE IF NOT EXISTS acougue_sale_payments (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    sale_id INTEGER NOT NULL REFERENCES acougue_sales(id) ON DELETE CASCADE,
+    forma TEXT NOT NULL,
+    valor REAL NOT NULL,
+    -- Só para dinheiro: quanto o cliente entregou, para calcular o troco.
+    valor_recebido REAL
+  )`);
+
+  for (const col of ['desconto REAL DEFAULT 0', 'acrescimo REAL DEFAULT 0',
+                     'troco REAL DEFAULT 0', 'cash_session_id INTEGER REFERENCES acougue_cash_sessions(id)']) {
+    await pool.query(`ALTER TABLE acougue_sales ADD COLUMN IF NOT EXISTS ${col}`);
+  }
+  await pool.query('ALTER TABLE acougue_sale_items ADD COLUMN IF NOT EXISTS desconto REAL DEFAULT 0');
+
   // ─── Livro de movimentação de estoque (controle interno) ───────────────────
   // Toda alteração de saldo passa a deixar rastro aqui: entrada por nota, desossa, venda no
   // caixa, quebra na câmara e ajuste manual. Sem esse livro, "sumiu 12 kg de picanha" é uma
@@ -2714,9 +2762,14 @@ app.get('/api/acougue/sales/:id', ...acougueOnly, async (req, res) => {
 // meio do loop de itens não pode deixar a venda "meio registrada" com estoque decrementado sem
 // a venda existir, ou vice-versa.
 app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
-  const { items, payment_method } = req.body;
+  const { items, payment_method, desconto, acrescimo, pagamentos } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: t(reqLang(req), 'Informe ao menos um item') });
+  }
+  const descontoVenda = Number(desconto) || 0;
+  const acrescimoVenda = Number(acrescimo) || 0;
+  if (descontoVenda < 0 || acrescimoVenda < 0) {
+    return res.status(400).json({ error: 'Desconto e acréscimo não podem ser negativos.' });
   }
   const client = await pool.connect();
   try {
@@ -2732,21 +2785,58 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
       );
       const product = rows[0];
       if (!product) throw Object.assign(new Error(t(reqLang(req), 'Produto não encontrado: {code}', { code: it.barcode || it.product_id })), { code: 'BAD_INPUT' });
-      const subtotal = round2(product.price * quantity);
+      const descontoItem = Number(it.desconto) || 0;
+      const bruto = round2(product.price * quantity);
+      if (descontoItem < 0 || descontoItem > bruto) {
+        throw Object.assign(new Error(`Desconto inválido em ${product.name}: não pode ser negativo nem maior que o item.`), { code: 'BAD_INPUT' });
+      }
+      const subtotal = round2(bruto - descontoItem);
       total += subtotal;
-      resolvedItems.push({ product, quantity, subtotal });
+      resolvedItems.push({ product, quantity, subtotal, descontoItem });
     }
+    const totalFinal = round2(total - descontoVenda + acrescimoVenda);
+    if (totalFinal < 0) {
+      throw Object.assign(new Error('O desconto não pode ser maior que o total da venda.'), { code: 'BAD_INPUT' });
+    }
+
+    // Pagamentos: aceita a lista discriminada (venda dividida) ou, sem ela, a forma única —
+    // o caixa antigo mandava só `payment_method` e continua funcionando.
+    const listaPagamentos = Array.isArray(pagamentos) && pagamentos.length
+      ? pagamentos.map(p => ({ forma: p.forma, valor: round2(Number(p.valor) || 0), valor_recebido: p.valor_recebido != null ? Number(p.valor_recebido) : null }))
+      : [{ forma: payment_method || 'dinheiro', valor: totalFinal, valor_recebido: null }];
+
+    const somaPagamentos = round2(listaPagamentos.reduce((s, p) => s + p.valor, 0));
+    // Tolerância de 1 centavo para arredondamento; acima disso é erro de digitação e a venda
+    // não pode fechar, senão o caixa nunca vai bater no fim do dia.
+    if (Math.abs(somaPagamentos - totalFinal) > 0.01) {
+      throw Object.assign(new Error(`Os pagamentos somam ${somaPagamentos.toFixed(2)} mas a venda é ${totalFinal.toFixed(2)}.`), { code: 'BAD_INPUT' });
+    }
+
+    // Troco só existe sobre dinheiro: o que o cliente entregou menos o que foi pago em espécie.
+    const emDinheiro = listaPagamentos.filter(p => p.forma === 'dinheiro');
+    const recebido = emDinheiro.reduce((s, p) => s + (p.valor_recebido ?? p.valor), 0);
+    const devidoEmDinheiro = emDinheiro.reduce((s, p) => s + p.valor, 0);
+    const troco = round2(Math.max(0, recebido - devidoEmDinheiro));
+
+    const sessao = await client.query('SELECT id FROM acougue_cash_sessions WHERE fechado_em IS NULL')
+      .then(r => r.rows[0] || null);
+
     const { rows: [{ count }] } = await client.query('SELECT COUNT(*)::int as count FROM acougue_sales');
     const saleNumber = `V${String(count + 1).padStart(6, '0')}`;
     const { rows: [sale] } = await client.query(
-      'INSERT INTO acougue_sales (sale_number, total_value, payment_method, created_by) VALUES ($1,$2,$3,$4) RETURNING *',
-      [saleNumber, round2(total), payment_method || 'dinheiro', req.user.id]
+      `INSERT INTO acougue_sales (sale_number, total_value, payment_method, created_by, desconto, acrescimo, troco, cash_session_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [saleNumber, totalFinal, listaPagamentos[0].forma, req.user.id, descontoVenda, acrescimoVenda, troco, sessao?.id || null]
     );
+    for (const pg of listaPagamentos) {
+      await client.query('INSERT INTO acougue_sale_payments (sale_id, forma, valor, valor_recebido) VALUES ($1,$2,$3,$4)',
+        [sale.id, pg.forma, pg.valor, pg.valor_recebido]);
+    }
     const savedItems = [];
     for (const ri of resolvedItems) {
       await client.query(
-        'INSERT INTO acougue_sale_items (sale_id, product_id, product_name, barcode, quantity, unit_price, subtotal) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-        [sale.id, ri.product.id, ri.product.name, ri.product.barcode, ri.quantity, ri.product.price, ri.subtotal]
+        'INSERT INTO acougue_sale_items (sale_id, product_id, product_name, barcode, quantity, unit_price, subtotal, desconto) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [sale.id, ri.product.id, ri.product.name, ri.product.barcode, ri.quantity, ri.product.price, ri.subtotal, ri.descontoItem || 0]
       );
       await client.query('UPDATE acougue_products SET stock_qty = stock_qty - $1 WHERE id = $2', [ri.quantity, ri.product.id]);
       await registrarMovimento(client, {
@@ -2755,7 +2845,7 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
       savedItems.push({ product_id: ri.product.id, name: ri.product.name, barcode: ri.product.barcode, quantity: ri.quantity, unit_price: ri.product.price, subtotal: ri.subtotal });
     }
     await client.query('COMMIT');
-    res.status(201).json({ ...sale, items: savedItems });
+    res.status(201).json({ ...sale, items: savedItems, pagamentos: listaPagamentos, troco });
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.code === 'BAD_INPUT') return res.status(400).json({ error: err.message });
@@ -2826,6 +2916,7 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
       })),
       valor_total: sale.total_value,
       forma_pagamento: sale.payment_method,
+      pagamentos: await db.all('SELECT forma, valor FROM acougue_sale_payments WHERE sale_id = ?', [sale.id]),
       cpf_destinatario: req.body?.cpf || null,
     });
 
@@ -3269,6 +3360,108 @@ app.post('/api/acougue/products/:id/conferir-plu', ...acougueOnly, async (req, r
       [confere ? 1 : 0, observacao || null, req.user.id, req.params.id]);
 
     res.json(await db.get('SELECT id, name, scale_code, plu_confere, plu_observacao FROM acougue_products WHERE id = ?', [req.params.id]));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Caixa: sessão, sangria e suprimento ---- */
+app.get('/api/acougue/cash-session', ...acougueOnly, async (req, res) => {
+  try {
+    const sessao = await db.get(
+      `SELECT s.*, u.name AS aberto_por_nome FROM acougue_cash_sessions s
+       LEFT JOIN users u ON u.id = s.aberto_por WHERE s.fechado_em IS NULL`, []);
+    if (!sessao) return res.json({ aberta: false });
+
+    // O esperado em dinheiro é o que dá para conferir na gaveta: abertura + vendas em
+    // espécie + suprimentos - sangrias. Cartão e PIX não passam pela gaveta, então entram
+    // no resumo só como informação.
+    const { rows: [r] } = await pool.query(
+      `SELECT
+         COALESCE(SUM(p.valor) FILTER (WHERE p.forma = 'dinheiro'), 0) AS dinheiro,
+         COALESCE(SUM(p.valor) FILTER (WHERE p.forma <> 'dinheiro'), 0) AS outras,
+         COUNT(DISTINCT s.id)::int AS vendas
+       FROM acougue_sales s JOIN acougue_sale_payments p ON p.sale_id = s.id
+       WHERE s.cash_session_id = $1 AND s.status = 'concluida'`, [sessao.id]);
+    const { rows: [m] } = await pool.query(
+      `SELECT COALESCE(SUM(valor) FILTER (WHERE tipo = 'suprimento'), 0) AS suprimentos,
+              COALESCE(SUM(valor) FILTER (WHERE tipo = 'sangria'), 0) AS sangrias
+       FROM acougue_cash_movements WHERE session_id = $1`, [sessao.id]);
+
+    const esperado = round2(Number(sessao.valor_abertura) + Number(r.dinheiro) + Number(m.suprimentos) - Number(m.sangrias));
+    const movimentos = await db.all(
+      'SELECT * FROM acougue_cash_movements WHERE session_id = ? ORDER BY created_at DESC', [sessao.id]);
+
+    res.json({
+      aberta: true, ...sessao, vendas: r.vendas,
+      total_dinheiro: round2(Number(r.dinheiro)), total_outras: round2(Number(r.outras)),
+      suprimentos: round2(Number(m.suprimentos)), sangrias: round2(Number(m.sangrias)),
+      esperado_na_gaveta: esperado, movimentos,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/acougue/cash-session/abrir', ...acougueOnly, async (req, res) => {
+  const valor = Number(req.body?.valor_abertura || 0);
+  if (!(valor >= 0)) return res.status(400).json({ error: 'Valor de abertura inválido.' });
+  try {
+    const aberta = await db.get('SELECT id FROM acougue_cash_sessions WHERE fechado_em IS NULL', []);
+    if (aberta) return res.status(409).json({ error: 'Já existe um caixa aberto. Feche antes de abrir outro.' });
+    const { rows } = await db.run(
+      'INSERT INTO acougue_cash_sessions (aberto_por, valor_abertura) VALUES (?,?)', [req.user.id, valor]);
+    res.status(201).json({ id: rows[0].id, valor_abertura: valor });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/acougue/cash-session/movimento', ...acougueOnly, async (req, res) => {
+  const { tipo, valor, motivo } = req.body || {};
+  if (!['sangria', 'suprimento'].includes(tipo)) return res.status(400).json({ error: 'Tipo deve ser sangria ou suprimento.' });
+  if (!(Number(valor) > 0)) return res.status(400).json({ error: 'Informe um valor maior que zero.' });
+  if (!String(motivo || '').trim()) return res.status(400).json({ error: 'Informe o motivo — é o que permite auditar a gaveta depois.' });
+  try {
+    const sessao = await db.get('SELECT * FROM acougue_cash_sessions WHERE fechado_em IS NULL', []);
+    if (!sessao) return res.status(409).json({ error: 'Nenhum caixa aberto.' });
+    await db.run('INSERT INTO acougue_cash_movements (session_id, tipo, valor, motivo, created_by) VALUES (?,?,?,?,?)',
+      [sessao.id, tipo, Number(valor), String(motivo).trim(), req.user.id]);
+    res.status(201).json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/acougue/cash-session/fechar', ...acougueOnly, async (req, res) => {
+  const contado = Number(req.body?.valor_contado);
+  if (!(contado >= 0)) return res.status(400).json({ error: 'Informe o valor contado na gaveta.' });
+  try {
+    const sessao = await db.get('SELECT * FROM acougue_cash_sessions WHERE fechado_em IS NULL', []);
+    if (!sessao) return res.status(409).json({ error: 'Nenhum caixa aberto.' });
+
+    const { rows: [r] } = await pool.query(
+      `SELECT COALESCE(SUM(p.valor) FILTER (WHERE p.forma = 'dinheiro'), 0) AS dinheiro
+       FROM acougue_sales s JOIN acougue_sale_payments p ON p.sale_id = s.id
+       WHERE s.cash_session_id = $1 AND s.status = 'concluida'`, [sessao.id]);
+    const { rows: [m] } = await pool.query(
+      `SELECT COALESCE(SUM(valor) FILTER (WHERE tipo = 'suprimento'), 0) AS sup,
+              COALESCE(SUM(valor) FILTER (WHERE tipo = 'sangria'), 0) AS san
+       FROM acougue_cash_movements WHERE session_id = $1`, [sessao.id]);
+
+    const esperado = round2(Number(sessao.valor_abertura) + Number(r.dinheiro) + Number(m.sup) - Number(m.san));
+    const diferenca = round2(contado - esperado);
+    await db.run(
+      `UPDATE acougue_cash_sessions SET fechado_por=?, fechado_em=CURRENT_TIMESTAMP,
+         valor_contado=?, diferenca=?, observacao=? WHERE id=?`,
+      [req.user.id, contado, diferenca, req.body?.observacao || null, sessao.id]);
+
+    res.json({
+      id: sessao.id, esperado, contado, diferenca,
+      // Nomear sobra e falta evita a leitura errada do sinal na hora do aperto.
+      situacao: diferenca === 0 ? 'confere' : (diferenca > 0 ? 'sobra' : 'falta'),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/acougue/cash-session/historico', ...acougueOnly, async (req, res) => {
+  try {
+    res.json(await db.all(
+      `SELECT s.*, u.name AS fechado_por_nome FROM acougue_cash_sessions s
+       LEFT JOIN users u ON u.id = s.fechado_por
+       WHERE s.fechado_em IS NOT NULL ORDER BY s.fechado_em DESC LIMIT 60`, []));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

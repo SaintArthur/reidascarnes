@@ -171,11 +171,19 @@ async function cancelNFCe(ref, justificativa) {
 }
 
 // Mapeia a forma de pagamento do caixa para o código da tabela da SEFAZ (campo tPag).
+// Códigos tPag da tabela da SEFAZ. Vale alimentação é indispensável num açougue e faltava;
+// 'credito_loja' é o fiado da caderneta, que a SEFAZ reconhece como crédito do próprio
+// estabelecimento (05).
 const FORMA_PAGAMENTO_SEFAZ = {
   dinheiro: '01',
+  cheque: '02',
   cartao_credito: '03',
   cartao_debito: '04',
+  credito_loja: '05',
+  vale_alimentacao: '10',
+  vale_refeicao: '11',
   pix: '17',
+  transferencia: '18',
 };
 
 
@@ -247,7 +255,7 @@ async function cartaCorrecaoNFe(ref, correcao) {
   return focusRequest('POST', `/v2/nfe/${encodeURIComponent(ref)}/carta_correcao`, { correcao });
 }
 
-function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, cpf_destinatario }) {
+function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, pagamentos, cpf_destinatario }) {
   return {
     natureza_operacao: 'Venda ao consumidor',
     data_emissao: dataEmissaoLocal(),
@@ -302,10 +310,15 @@ function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, cpf_d
     valor_seguro: '0.00',
     valor_desconto: '0.00',
     valor_total,
-    formas_pagamento: [{
-      forma_pagamento: FORMA_PAGAMENTO_SEFAZ[forma_pagamento] || '99',
-      valor_pagamento: valor_total,
-    }],
+    // Cada forma vai discriminada: a SEFAZ exige o grupo completo, e uma venda dividida
+    // entre dinheiro e cartão precisa das duas linhas.
+    formas_pagamento: (pagamentos && pagamentos.length
+      ? pagamentos
+      : [{ forma: forma_pagamento, valor: valor_total }]
+    ).map((p) => ({
+      forma_pagamento: FORMA_PAGAMENTO_SEFAZ[p.forma] || '99',
+      valor_pagamento: p.valor,
+    })),
   };
 }
 

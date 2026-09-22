@@ -914,6 +914,21 @@
       );
     }
 
+    // Formas de pagamento aceitas. Vale alimentação é indispensável num açougue e faltava;
+    // "fiado" é a caderneta, que a SEFAZ reconhece como crédito do próprio estabelecimento.
+    const ACG_PAGAMENTOS = [
+      { id: 'dinheiro', label: 'Dinheiro' },
+      { id: 'cartao_debito', label: 'Cartão de débito' },
+      { id: 'cartao_credito', label: 'Cartão de crédito' },
+      { id: 'pix', label: 'PIX' },
+      { id: 'vale_alimentacao', label: 'Vale alimentação' },
+      { id: 'vale_refeicao', label: 'Vale refeição' },
+      { id: 'transferencia', label: 'Transferência' },
+      { id: 'cheque', label: 'Cheque' },
+      { id: 'credito_loja', label: 'Fiado (caderneta)' },
+    ];
+    const acgLabelPagamento = (id) => (ACG_PAGAMENTOS.find(p => p.id === id) || {}).label || id;
+
     /* ---- ATALHOS DE TECLADO DO CAIXA ---- */
     // Rótulos e ordem de exibição na barra de funções. A ordem aqui é a ordem na tela.
     const ACG_ACOES_CAIXA = [
@@ -960,7 +975,7 @@
       const s = settings || {};
       const esc = (v) => String(v ?? '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
       const money = (v) => Number(v || 0).toFixed(2).replace('.', ',');
-      const pagamentoLabel = { dinheiro: 'Dinheiro', cartao_debito: 'Cartão de débito', cartao_credito: 'Cartão de crédito', pix: 'PIX' }[paymentMethod] || paymentMethod;
+      const pagamentoLabel = acgLabelPagamento(paymentMethod);
 
       const linhas = items.map((i, n) => `
         <tr><td colspan="4" class="desc">${String(n + 1).padStart(3, '0')} ${esc(i.name)}</td></tr>
@@ -1033,6 +1048,148 @@
       setTimeout(() => frame.remove(), 60000);
     }
 
+    /* ---- GAVETA DO CAIXA ---- */
+    // Sem sessão de caixa não existe conferência de dinheiro: ninguém sabe se a gaveta bate
+    // com o que foi vendido. Fica no topo do Caixa porque o operador precisa ver o estado da
+    // gaveta antes de começar a vender, não escondido noutra aba.
+    function AcougueGaveta({ showToast }) {
+      const [sessao, setSessao] = useState(null);
+      const [abrindo, setAbrindo] = useState('');
+      const [painel, setPainel] = useState(null);
+      const [mov, setMov] = useState({ tipo: 'sangria', valor: '', motivo: '' });
+      const [contado, setContado] = useState('');
+
+      const load = async () => {
+        const res = await apiCall('GET', '/acougue/cash-session');
+        if (res.ok) setSessao(res.data);
+      };
+      useEffect(() => { load(); }, []);
+
+      const abrir = async () => {
+        const res = await apiCall('POST', '/acougue/cash-session/abrir', { valor_abertura: Number(abrindo) || 0 });
+        if (res.ok) { showToast('Caixa aberto', 'success'); setAbrindo(''); load(); }
+        else showToast(res.data?.error || 'Erro ao abrir', 'error');
+      };
+
+      const lancarMov = async () => {
+        const res = await apiCall('POST', '/acougue/cash-session/movimento', { ...mov, valor: Number(mov.valor) });
+        if (res.ok) { showToast(`${mov.tipo === 'sangria' ? 'Sangria' : 'Suprimento'} registrado`, 'success'); setMov({ tipo: 'sangria', valor: '', motivo: '' }); setPainel(null); load(); }
+        else showToast(res.data?.error || 'Erro', 'error');
+      };
+
+      const fechar = async () => {
+        const res = await apiCall('POST', '/acougue/cash-session/fechar', { valor_contado: Number(contado) });
+        if (!res.ok) { showToast(res.data?.error || 'Erro ao fechar', 'error'); return; }
+        const d = res.data;
+        const msg = d.situacao === 'confere' ? 'Caixa fechado — valores conferem'
+          : `Caixa fechado com ${d.situacao.toUpperCase()} de ${fmtCur(Math.abs(d.diferenca))}`;
+        showToast(msg, d.situacao === 'confere' ? 'success' : 'error');
+        setContado(''); setPainel(null); load();
+      };
+
+      if (!sessao) return null;
+
+      if (!sessao.aberta) {
+        return (
+          <div style={{ background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
+            <p className="syne" style={{ color: '#f59e0b', fontWeight: 700, fontSize: 15, margin: '0 0 4px' }}>
+              <i className="fas fa-lock" style={{ marginRight: 8 }}></i>Caixa fechado
+            </p>
+            <p style={{ color: 'var(--bp-text-secondary)', fontSize: 12, margin: '0 0 12px' }}>
+              Abra o caixa informando o troco inicial da gaveta. Vendas feitas com o caixa fechado
+              não entram na conferência do dia.
+            </p>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 180 }}>
+                <AcgInput label="Troco inicial (R$)" type="number" step="0.01" min="0" value={abrindo}
+                  onChange={e => setAbrindo(e.target.value)} placeholder="0,00" />
+              </div>
+              <div style={{ marginBottom: 12 }}><AcgButton onClick={abrir}>Abrir caixa</AcgButton></div>
+            </div>
+          </div>
+        );
+      }
+
+      const Item = ({ label, valor, cor }) => (
+        <div style={{ background: 'var(--bp-card)', border: '1px solid var(--bp-border2)', borderRadius: 10, padding: '10px 12px' }}>
+          <div style={{ color: 'var(--bp-text-faint)', fontSize: 11 }}>{label}</div>
+          <div style={{ color: cor || 'var(--bp-text)', fontWeight: 700, fontSize: 16 }}>{fmtCur(valor)}</div>
+        </div>
+      );
+
+      return (
+        <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: 0 }}>
+              <i className="fas fa-cash-register" style={{ marginRight: 8, color: '#10b981' }}></i>
+              Caixa aberto — {sessao.vendas} venda(s)
+            </p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <AcgButton variant="ghost" onClick={() => setPainel(painel === 'mov' ? null : 'mov')}>Sangria / Suprimento</AcgButton>
+              <AcgButton onClick={() => setPainel(painel === 'fechar' ? null : 'fechar')}>Fechar caixa</AcgButton>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+            <Item label="Abertura" valor={sessao.valor_abertura} />
+            <Item label="Vendas em dinheiro" valor={sessao.total_dinheiro} />
+            <Item label="Outras formas" valor={sessao.total_outras} />
+            <Item label="Sangrias" valor={sessao.sangrias} cor="#ef4444" />
+            <Item label="Esperado na gaveta" valor={sessao.esperado_na_gaveta} cor="#10b981" />
+          </div>
+          <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '8px 0 0' }}>
+            Cartão, PIX e vale não passam pela gaveta — entram só como informação.
+          </p>
+
+          {painel === 'mov' && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--bp-border)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+                <AcgSelect label="Tipo" value={mov.tipo} onChange={e => setMov({ ...mov, tipo: e.target.value })}>
+                  <option value="sangria">Sangria (retira da gaveta)</option>
+                  <option value="suprimento">Suprimento (coloca na gaveta)</option>
+                </AcgSelect>
+                <AcgInput label="Valor (R$)" type="number" step="0.01" min="0" value={mov.valor} onChange={e => setMov({ ...mov, valor: e.target.value })} />
+                <AcgInput label="Motivo" value={mov.motivo} onChange={e => setMov({ ...mov, motivo: e.target.value })} placeholder="ex: depósito no banco" />
+              </div>
+              <AcgButton onClick={lancarMov} disabled={!(Number(mov.valor) > 0) || !mov.motivo.trim()}>Registrar</AcgButton>
+            </div>
+          )}
+
+          {painel === 'fechar' && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--bp-border)' }}>
+              <p style={{ color: 'var(--bp-text-secondary)', fontSize: 12, margin: '0 0 10px' }}>
+                Conte o dinheiro da gaveta e informe o total. O sistema compara com os <strong>{fmtCur(sessao.esperado_na_gaveta)}</strong> esperados.
+              </p>
+              <div style={{ maxWidth: 220 }}>
+                <AcgInput label="Valor contado (R$)" type="number" step="0.01" min="0" value={contado} onChange={e => setContado(e.target.value)} />
+              </div>
+              {contado !== '' && (
+                <p style={{ fontSize: 13, margin: '0 0 12px', color: Math.abs(Number(contado) - sessao.esperado_na_gaveta) < 0.01 ? '#10b981' : '#ef4444' }}>
+                  Diferença: {fmtCur(Number(contado) - sessao.esperado_na_gaveta)}
+                </p>
+              )}
+              <AcgButton onClick={fechar} disabled={contado === ''}>Confirmar fechamento</AcgButton>
+            </div>
+          )}
+
+          {sessao.movimentos?.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <AcgTable
+                emptyLabel="Sem movimentos"
+                columns={[
+                  { key: 'tipo', label: 'Tipo', render: r => r.tipo === 'sangria' ? 'Sangria' : 'Suprimento' },
+                  { key: 'valor', label: 'Valor', align: 'right', render: r => <span style={{ color: r.tipo === 'sangria' ? '#ef4444' : '#10b981' }}>{fmtCur(r.valor)}</span> },
+                  { key: 'motivo', label: 'Motivo' },
+                  { key: 'created_at', label: 'Hora', render: r => new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) },
+                ]}
+                rows={sessao.movimentos}
+              />
+            </div>
+          )}
+        </div>
+      );
+    }
+
     /* ---- CAIXA ---- */
     function AcougueCaixa({ showToast }) {
       const [barcode, setBarcode] = useState('');
@@ -1051,7 +1208,18 @@
       const [filtroProduto, setFiltroProduto] = useState('');
       // Último item lançado, exibido em destaque no painel lateral.
       const [ultimoItem, setUltimoItem] = useState(null);
+      const [desconto, setDesconto] = useState('');
+      const [acrescimo, setAcrescimo] = useState('');
+      // Quanto o cliente entregou em dinheiro. Só isso permite calcular troco — o erro mais
+      // básico que faltava no caixa.
+      const [recebido, setRecebido] = useState('');
       const inputRef = useRef(null);
+
+      // Total já com desconto e acréscimo, e o troco em cima dele. Ficam derivados (não em
+      // estado) para não existir a possibilidade de o número da tela divergir do que é enviado.
+      const totalBruto = cart.reduce((s, c) => s + c.quantity * c.product.price, 0);
+      const totalFinal = Math.max(0, totalBruto - (Number(desconto) || 0) + (Number(acrescimo) || 0));
+      const trocoCalculado = (Number(recebido) || 0) - totalFinal;
 
       // Busca por nome ou PLU — o operador que sabe o código digita o número, quem não sabe
       // digita o começo do nome.
@@ -1149,6 +1317,13 @@
         const res = await apiCall('POST', '/acougue/sales', {
           items: cart.map(c => ({ product_id: c.product.id, quantity: c.quantity })),
           payment_method: paymentMethod,
+          desconto: Number(desconto) || 0,
+          acrescimo: Number(acrescimo) || 0,
+          pagamentos: [{
+            forma: paymentMethod,
+            valor: Number(totalFinal.toFixed(2)),
+            valor_recebido: paymentMethod === 'dinheiro' && Number(recebido) > 0 ? Number(recebido) : null,
+          }],
         });
         if (!res.ok) {
           setFinalizing(false);
@@ -1175,6 +1350,7 @@
         setCart([]);
         setCpfNota('');
         setUltimoItem(null);
+        setDesconto(''); setAcrescimo(''); setRecebido('');
         loadToday();
         inputRef.current?.focus();
       };
@@ -1262,6 +1438,8 @@
         <div>
           <AcgSectionTitle icon="fa-cash-register" title="Caixa" subtitle="Leitor de código de barras: escaneie e o item entra automaticamente" />
 
+          <AcougueGaveta showToast={showToast} />
+
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)', gap: 16, marginBottom: 24 }}>
             <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
               <label style={{ display: 'block', marginBottom: 16 }}>
@@ -1333,11 +1511,37 @@
             <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, display: 'flex', flexDirection: 'column' }}>
               <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 16px' }}>Pagamento</p>
               <AcgSelect label="Forma de pagamento" value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)}>
-                <option value="dinheiro">Dinheiro</option>
-                <option value="cartao_debito">Cartão de débito</option>
-                <option value="cartao_credito">Cartão de crédito</option>
-                <option value="pix">PIX</option>
+                {ACG_PAGAMENTOS.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
               </AcgSelect>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <AcgInput label="Desconto (R$)" type="number" step="0.01" min="0" value={desconto}
+                  onChange={e => setDesconto(e.target.value)} placeholder="0,00" />
+                <AcgInput label="Acréscimo (R$)" type="number" step="0.01" min="0" value={acrescimo}
+                  onChange={e => setAcrescimo(e.target.value)} placeholder="0,00" />
+              </div>
+
+              {paymentMethod === 'dinheiro' && (
+                <div>
+                  <AcgInput label="Valor recebido (R$)" type="number" step="0.01" min="0" value={recebido}
+                    onChange={e => setRecebido(e.target.value)} placeholder="quanto o cliente deu" />
+                  {Number(recebido) > 0 && (
+                    <div style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                      padding: '10px 14px', borderRadius: 10, marginBottom: 12,
+                      background: trocoCalculado >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
+                      border: `1px solid ${trocoCalculado >= 0 ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)'}`,
+                    }}>
+                      <span style={{ fontSize: 13, color: 'var(--bp-text-secondary)' }}>
+                        {trocoCalculado >= 0 ? 'TROCO' : 'FALTAM'}
+                      </span>
+                      <span className="syne" style={{ fontSize: 26, fontWeight: 800, color: trocoCalculado >= 0 ? '#10b981' : '#ef4444' }}>
+                        {fmtCur(Math.abs(trocoCalculado))}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Espelha o painel do PDV antigo: o item recém-bipado em letra grande, para o
                   operador conferir de relance se pegou o corte e o peso certos sem precisar ler
                   a tabela do carrinho. É o que evita o cliente reclamar depois do cupom. */}
@@ -1377,9 +1581,9 @@
                 </div>
                 <p style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', color: 'var(--bp-text)', margin: '0 0 16px' }}>
                   <span style={{ fontSize: 13, color: 'var(--bp-text-faint)', fontWeight: 600 }}>TOTAL</span>
-                  <span className="syne" style={{ fontSize: 34, fontWeight: 800, letterSpacing: -1 }}>{fmtCur(total)}</span>
+                  <span className="syne" style={{ fontSize: 34, fontWeight: 800, letterSpacing: -1 }}>{fmtCur(totalFinal)}</span>
                 </p>
-                <AcgButton onClick={finalize} disabled={cart.length === 0 || finalizing} style={{ width: '100%', padding: '14px 0', fontSize: 15 }}>
+                <AcgButton onClick={finalize} disabled={cart.length === 0 || finalizing || (paymentMethod === 'dinheiro' && Number(recebido) > 0 && trocoCalculado < 0)} style={{ width: '100%', padding: '14px 0', fontSize: 15 }}>
                   {finalizing ? 'Processando...' : <><i className="fas fa-check" style={{ marginRight: 8 }}></i>Finalizar venda</>}
                 </AcgButton>
               </div>

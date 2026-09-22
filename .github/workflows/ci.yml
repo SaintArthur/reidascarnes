@@ -1,0 +1,47 @@
+name: CI
+
+# Só testes. O deploy deste sistema é manual (deploy/README.md: git pull + systemctl restart), e
+# continua sendo — nada aqui toca a instância.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: reidascarnes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/reidascarnes
+      # Só pro CI. O server.js recusa subir sem JWT_SECRET (e sem pelo menos 24 caracteres).
+      JWT_SECRET: ci-only-segredo-nao-usar-em-producao-0123456789abcdef
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Guarda de isolamento + testes
+        run: npm test

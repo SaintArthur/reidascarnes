@@ -159,11 +159,12 @@
       sessionStorage.removeItem('user');
     };
 
+    // Devolve também `headers`: a tela de login lê o RateLimit-Reset do 429 pra mostrar quanto
+    // tempo falta em vez de "tente mais tarde".
     const apiCall = async (method, endpoint, body = null) => {
       const token = localStorage.getItem('token') || sessionStorage.getItem('token');
       const headers = {
         'Content-Type': 'application/json',
-        'X-Lang': localStorage.getItem('lang') || 'pt-BR',
         ...(token && { 'Authorization': `Bearer ${token}` })
       };
       let response;
@@ -174,11 +175,7 @@
           ...(body && { body: JSON.stringify(body) })
         });
       } catch (err) {
-        return { ok: false, status: 0, data: { error: 'Sem conexão com o servidor. Verifique a internet e tente de novo.' } };
-      }
-      if (response.status === 401 && token) {
-        clearSession();
-        window.location.reload();
+        return { ok: false, status: 0, data: { error: 'Sem conexão com o servidor. Verifique a internet e tente de novo.' }, headers: null };
       }
       let data;
       try {
@@ -188,7 +185,27 @@
           ? { error: 'Arquivo grande demais.' }
           : { error: 'Resposta inesperada do servidor.' };
       }
-      return { ok: response.ok, status: response.status, data };
+      // 401 com sessão = a sessão acabou de verdade (revogada, vencida, "Sair" em outra aba).
+      // 503 NÃO cai aqui de propósito: banco fora do ar não é motivo pra deslogar ninguém.
+      if (response.status === 401 && token) {
+        clearSession();
+        window.location.reload();
+        return new Promise(() => {});
+      }
+      if (response.status === 403 && token && data?.code === 'usuario_desativado') {
+        clearSession();
+        window.location.reload();
+        return new Promise(() => {});
+      }
+      // O dono gerou uma senha provisória pra esta pessoa enquanto ela estava logada: o servidor
+      // passa a recusar tudo até a troca. Marca no navegador e recarrega — o App cai na tela
+      // de troca em vez de ficar mostrando erro em cada clique.
+      if (response.status === 403 && token && data?.code === 'senha_provisoria') {
+        updateStoredUser({ must_change_password: true });
+        window.location.reload();
+        return new Promise(() => {});
+      }
+      return { ok: response.ok, status: response.status, data, headers: response.headers };
     };
 
     /* ======================================================

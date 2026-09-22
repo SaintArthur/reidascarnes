@@ -41,9 +41,40 @@ cp .env.example .env    # preencha DATABASE_URL e JWT_SECRET
 npm start
 ```
 
-O banco é criado e populado na primeira subida, com o usuário do açougue e a tabela de
-rendimento de referência. Acesso padrão: `reidascarnes` / `reidascarnes` — **troque antes de
-expor o sistema**.
+O banco é criado e populado na primeira subida, com o dono do açougue e a tabela de rendimento
+de referência. Acesso padrão: `reidascarnes` / `reidascarnes`. **O primeiro login obriga a trocar
+essa senha** antes de abrir qualquer tela, e a tela de Equipe avisa enquanto ela estiver em uso.
+
+`JWT_SECRET` é obrigatório (mínimo 24 caracteres): sem ele o servidor não sobe. Não existe mais
+fallback — o antigo era público.
+
+## Equipe e papéis
+
+Cada pessoa entra com o próprio usuário. Quem cria os acessos é o dono, em **Equipe e Acessos**:
+o sistema gera uma senha provisória (mostrada uma vez) e obriga a pessoa a criar a dela no primeiro
+login. Não há recuperação por e-mail: quem esquece a senha pede ao dono outra provisória.
+
+| Papel | Alcança |
+|---|---|
+| **Dono** | Tudo — fiscal, estoque, relatórios, configurações e a equipe. |
+| **Caixa** | O balcão: vender, emitir a NFC-e da venda, gaveta (abrir, sangria, suprimento, fechar), clientes e fiado, conferir etiquetas. |
+
+Com isso o `created_by` das vendas, o `aberto_por`/`fechado_por` da gaveta e o autor de cada
+sangria passam a dizer **quem** fez — antes era sempre o mesmo login.
+
+Sessões são revogáveis de verdade: **Sair** encerra a sessão no servidor, trocar a senha derruba
+as outras, desativar alguém derruba tudo na hora. Cada pessoa vê e encerra as próprias sessões em
+**Minha Conta**; o dono vê o histórico de acessos (logins, tentativas erradas, alterações na
+equipe) em Equipe. "Manter conectado" no login vale 7 dias; sem marcar, 12 h.
+
+## Testes
+
+```bash
+npm test     # guarda de isolamento + Jest/Supertest contra o Postgres de DATABASE_URL
+```
+
+O CI (`.github/workflows/ci.yml`) roda o mesmo em push e PR para `main`, num Postgres 16 próprio.
+Ele não faz deploy — o deploy continua manual (ver `deploy/README.md`).
 
 ## Emissão fiscal
 

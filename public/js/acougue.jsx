@@ -14,26 +14,38 @@
     };
     const acgMonthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 
-    function useAcougueNav() {
-      return [
-        { id: 'inicio', icon: 'fas fa-chart-pie', label: 'Início' },
-        { id: 'entrada', icon: 'fas fa-truck-loading', label: 'Entrada de Carcaça' },
-        { id: 'notas-entrada', icon: 'fas fa-file-import', label: 'Entrada de Notas' },
-        { id: 'camara', icon: 'fas fa-snowflake', label: 'Câmara Fria' },
-        { id: 'rendimento', icon: 'fas fa-calculator', label: 'Rendimento de Carcaça' },
-        { id: 'precificacao', icon: 'fas fa-money-bill-trend-up', label: 'Precificação' },
-        { id: 'saida', icon: 'fas fa-drumstick-bite', label: 'Saída de Cortes' },
-        { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos' },
-        { id: 'producao', icon: 'fas fa-industry', label: 'Produção e Lotes' },
-        { id: 'conferencia', icon: 'fas fa-clipboard-check', label: 'Conferir Etiquetas' },
-        { id: 'caixa', icon: 'fas fa-cash-register', label: 'Caixa' },
-        { id: 'clientes', icon: 'fas fa-users', label: 'Clientes e Fiado' },
-        { id: 'notas', icon: 'fas fa-file-invoice', label: 'Emissão de Nota' },
-        { id: 'relatorios', icon: 'fas fa-chart-column', label: 'Relatórios' },
-        { id: 'impostos', icon: 'fas fa-percent', label: 'PIS / COFINS' },
-        { id: 'config', icon: 'fas fa-gear', label: 'Configurações' },
-      ];
+    // Cada item diz quem o vê. A lista que VALE é a do servidor (`equipe` vs `donoOnly` em
+    // server.js); esta só evita mostrar botão que vai responder 403. Qualquer papel que não seja
+    // 'caixa' é tratado como dono — inclui o 'acougue' antigo guardado num navegador que ainda
+    // não recarregou depois da migração.
+    const ACG_PAPEL = (role) => (role === 'caixa' ? 'caixa' : 'dono');
+    const ACG_ROTULO_PAPEL = { dono: 'Dono', caixa: 'Caixa' };
+    const ACG_NAV_TODOS = [
+      { id: 'inicio', icon: 'fas fa-chart-pie', label: 'Início', papeis: ['dono'] },
+      { id: 'caixa', icon: 'fas fa-cash-register', label: 'Caixa', papeis: ['dono', 'caixa'] },
+      { id: 'clientes', icon: 'fas fa-users', label: 'Clientes e Fiado', papeis: ['dono', 'caixa'] },
+      { id: 'conferencia', icon: 'fas fa-clipboard-check', label: 'Conferir Etiquetas', papeis: ['dono', 'caixa'] },
+      { id: 'entrada', icon: 'fas fa-truck-loading', label: 'Entrada de Carcaça', papeis: ['dono'] },
+      { id: 'notas-entrada', icon: 'fas fa-file-import', label: 'Entrada de Notas', papeis: ['dono'] },
+      { id: 'camara', icon: 'fas fa-snowflake', label: 'Câmara Fria', papeis: ['dono'] },
+      { id: 'rendimento', icon: 'fas fa-calculator', label: 'Rendimento de Carcaça', papeis: ['dono'] },
+      { id: 'precificacao', icon: 'fas fa-money-bill-trend-up', label: 'Precificação', papeis: ['dono'] },
+      { id: 'saida', icon: 'fas fa-drumstick-bite', label: 'Saída de Cortes', papeis: ['dono'] },
+      { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos', papeis: ['dono'] },
+      { id: 'producao', icon: 'fas fa-industry', label: 'Produção e Lotes', papeis: ['dono'] },
+      { id: 'notas', icon: 'fas fa-file-invoice', label: 'Emissão de Nota', papeis: ['dono'] },
+      { id: 'relatorios', icon: 'fas fa-chart-column', label: 'Relatórios', papeis: ['dono'] },
+      { id: 'impostos', icon: 'fas fa-percent', label: 'PIS / COFINS', papeis: ['dono'] },
+      { id: 'config', icon: 'fas fa-gear', label: 'Configurações', papeis: ['dono'] },
+      { id: 'equipe', icon: 'fas fa-user-shield', label: 'Equipe e Acessos', papeis: ['dono'] },
+      { id: 'conta', icon: 'fas fa-circle-user', label: 'Minha Conta', papeis: ['dono', 'caixa'] },
+    ];
+    function useAcougueNav(role) {
+      const papel = ACG_PAPEL(role);
+      return ACG_NAV_TODOS.filter(i => i.papeis.includes(papel));
     }
+
+    const acgDataHora = (d) => (d ? new Date(d).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
 
     function AcgSpinner() {
       return <div style={{ textAlign: 'center', padding: '64px 0' }}><i className="fas fa-spinner fa-spin" style={{ fontSize: 28, color: ACG_ACCENT }}></i></div>;
@@ -3037,19 +3049,354 @@
       );
     }
 
+    /* ---- EQUIPE E ACESSOS (só o dono) ---- */
+    const ACG_EVENTOS_ACESSO = {
+      login: ['Entrou', '#10b981'], login_falhou: ['Senha errada', '#ef4444'], login_recusado_inativo: ['Bloqueado: acesso desativado', '#ef4444'],
+      logout: ['Saiu', 'var(--bp-text-muted)'], senha_alterada: ['Trocou a própria senha', '#3b82f6'], sessoes_encerradas: ['Encerrou outras sessões', '#3b82f6'],
+      usuario_criado: ['Criou usuário', '#d4a574'], usuario_desativado: ['Desativou usuário', '#f59e0b'], usuario_reativado: ['Reativou usuário', '#10b981'],
+      papel_alterado: ['Mudou o papel', '#d4a574'], senha_provisoria_gerada: ['Gerou senha provisória', '#f59e0b'],
+    };
+
+    // Painel que mostra a senha provisória UMA vez. O servidor não a guarda legível, então
+    // fechar isto sem anotar significa gerar outra.
+    function AcgSenhaProvisoria({ dados, onFechar }) {
+      const [copiado, setCopiado] = useState(false);
+      const copiar = async () => {
+        try { await navigator.clipboard.writeText(`Usuário: ${dados.login}\nSenha provisória: ${dados.senha}`); setCopiado(true); setTimeout(() => setCopiado(false), 2000); } catch {}
+      };
+      return (
+        <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.35)', borderRadius: 14, padding: '16px 18px', marginBottom: 20 }}>
+          <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 4px' }}><i className="fas fa-key" style={{ color: '#10b981', marginRight: 8 }}></i>Senha provisória de <strong>{dados.name || dados.login}</strong></p>
+          <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, margin: '0 0 12px', lineHeight: 1.5 }}>Anote ou copie agora — ela não aparece de novo. No primeiro login o sistema obriga a pessoa a criar a senha dela.</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+            <span className="mono" style={{ fontSize: 13, color: 'var(--bp-text-muted)' }}>usuário: <strong style={{ color: 'var(--bp-text)' }}>{dados.login}</strong></span>
+            <span className="mono" style={{ fontSize: 18, letterSpacing: 2, color: 'var(--bp-text)', background: 'var(--bp-card)', border: '1px dashed var(--bp-border2)', borderRadius: 8, padding: '6px 12px' }}>{dados.senha}</span>
+            <AcgButton type="button" variant="ghost" onClick={copiar}><i className={`fas ${copiado ? 'fa-check' : 'fa-copy'}`} style={{ marginRight: 6 }}></i>{copiado ? 'Copiado' : 'Copiar'}</AcgButton>
+            <AcgButton type="button" variant="ghost" onClick={onFechar}>Já anotei</AcgButton>
+          </div>
+        </div>
+      );
+    }
+
+    function AcougueEquipe({ showToast, user }) {
+      const [aba, setAba] = useState('usuarios');
+      const [usuarios, setUsuarios] = useState(null);
+      const [acessos, setAcessos] = useState(null);
+      const [form, setForm] = useState({ name: '', login: '', role: 'caixa' });
+      const [criando, setCriando] = useState(false);
+      const [senhaGerada, setSenhaGerada] = useState(null);
+      const [ocupado, setOcupado] = useState(null);
+
+      const load = async () => {
+        const res = await apiCall('GET', '/usuarios');
+        if (res.ok) setUsuarios(res.data); else showToast(res.data?.error || 'Erro ao carregar a equipe', 'error');
+      };
+      const loadAcessos = async () => {
+        const res = await apiCall('GET', '/usuarios/acessos');
+        if (res.ok) setAcessos(res.data); else showToast(res.data?.error || 'Erro ao carregar os acessos', 'error');
+      };
+      useEffect(() => { load(); }, []);
+      useEffect(() => { if (aba === 'acessos' && !acessos) loadAcessos(); }, [aba]);
+
+      const criar = async (e) => {
+        e.preventDefault();
+        setCriando(true);
+        const res = await apiCall('POST', '/usuarios', form);
+        setCriando(false);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível criar o usuário', 'error'); return; }
+        setSenhaGerada({ login: res.data.login, name: res.data.name, senha: res.data.senha_provisoria });
+        setForm({ name: '', login: '', role: 'caixa' });
+        showToast(`${res.data.name} cadastrado como ${res.data.role_label}`);
+        load();
+      };
+
+      const alterar = async (u, patch, aviso) => {
+        setOcupado(u.id);
+        const res = await apiCall('PATCH', `/usuarios/${u.id}`, patch);
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível alterar', 'error'); return; }
+        showToast(aviso);
+        load();
+      };
+
+      const novaSenha = async (u) => {
+        if (!window.confirm(`Gerar uma senha provisória para ${u.name}? As sessões abertas dessa pessoa serão encerradas.`)) return;
+        setOcupado(u.id);
+        const res = await apiCall('POST', `/usuarios/${u.id}/resetar-senha`);
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível gerar a senha', 'error'); return; }
+        setSenhaGerada({ login: res.data.login, name: u.name, senha: res.data.senha_provisoria });
+        load();
+      };
+
+      const th = { textAlign: 'left', padding: '10px 12px', color: 'var(--bp-text-faint)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em', borderBottom: '1px solid var(--bp-border)', whiteSpace: 'nowrap' };
+      const td = { padding: '11px 12px', borderBottom: '1px solid var(--bp-border)', fontSize: 13, color: 'var(--bp-text)', verticalAlign: 'middle' };
+      const badge = (texto, cor) => <span style={{ display: 'inline-block', padding: '3px 9px', borderRadius: 999, fontSize: 11, fontWeight: 600, color: cor, background: `${cor}1f`, border: `1px solid ${cor}55`, whiteSpace: 'nowrap' }}>{texto}</span>;
+      const abaBtn = (id, rotulo, icone) => (
+        <button type="button" onClick={() => setAba(id)} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid', borderColor: aba === id ? ACG_ACCENT : 'var(--bp-border2)', background: aba === id ? ACG_ACCENT_BG : 'none', color: aba === id ? ACG_ACCENT : 'var(--bp-text-muted)', cursor: 'pointer', fontSize: 13, fontWeight: 600, fontFamily: 'Inter, sans-serif' }}>
+          <i className={`fas ${icone}`} style={{ marginRight: 7 }}></i>{rotulo}
+        </button>
+      );
+
+      const comSenhaPadrao = (usuarios || []).some(u => u.senha_padrao);
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-user-shield" title="Equipe e Acessos" subtitle="Quem entra no sistema, com qual papel, e o histórico de acessos" />
+
+          {comSenhaPadrao && (
+            <div style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 12, padding: '12px 16px', marginBottom: 18, display: 'flex', gap: 10, alignItems: 'flex-start', color: 'var(--bp-text)', fontSize: 13, lineHeight: 1.5 }}>
+              <i className="fas fa-triangle-exclamation" style={{ color: '#ef4444', marginTop: 2 }}></i>
+              <span><strong>A senha padrão ainda está em uso.</strong> Ela está escrita no README público do sistema. Troque em <em>Minha Conta</em> (ou gere uma provisória aqui) antes de expor o sistema na internet.</span>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
+            {abaBtn('usuarios', 'Usuários', 'fa-users')}
+            {abaBtn('acessos', 'Histórico de acessos', 'fa-clock-rotate-left')}
+          </div>
+
+          {senhaGerada && <AcgSenhaProvisoria dados={senhaGerada} onFechar={() => setSenhaGerada(null)} />}
+
+          {aba === 'usuarios' && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(280px, 340px)', gap: 18, alignItems: 'start' }}>
+              <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, overflow: 'hidden' }}>
+                {!usuarios ? <AcgSpinner /> : (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead><tr><th style={th}>Nome</th><th style={th}>Login</th><th style={th}>Papel</th><th style={th}>Último acesso</th><th style={th}>Status</th><th style={th}></th></tr></thead>
+                      <tbody>
+                        {usuarios.map(u => (
+                          <tr key={u.id} style={{ opacity: u.active ? 1 : 0.55 }}>
+                            <td style={td}>
+                              <div style={{ fontWeight: 600 }}>{u.name}{u.eh_voce && <span style={{ color: ACG_ACCENT, fontSize: 11, marginLeft: 6 }}>(você)</span>}</div>
+                              {u.must_change_password && <div style={{ fontSize: 11, color: '#f59e0b' }}><i className="fas fa-key" style={{ marginRight: 4 }}></i>senha provisória pendente</div>}
+                              {u.senha_padrao && <div style={{ fontSize: 11, color: '#ef4444' }}><i className="fas fa-triangle-exclamation" style={{ marginRight: 4 }}></i>senha padrão</div>}
+                            </td>
+                            <td style={td}><span className="mono" style={{ fontSize: 12.5 }}>{u.login}</span></td>
+                            <td style={td}>
+                              {u.eh_voce ? badge(u.role_label, ACG_ACCENT) : (
+                                <select value={u.role} disabled={ocupado === u.id} onChange={e => alterar(u, { role: e.target.value }, `${u.name} agora é ${ACG_ROTULO_PAPEL[e.target.value]}`)}
+                                  style={{ padding: '5px 8px', borderRadius: 7, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12.5, fontFamily: 'Inter, sans-serif' }}>
+                                  <option value="dono">Dono</option>
+                                  <option value="caixa">Caixa</option>
+                                </select>
+                              )}
+                            </td>
+                            <td style={td}>
+                              <div style={{ fontSize: 12.5 }}>{acgDataHora(u.last_login_at)}</div>
+                              {u.last_login_ip && <div className="mono" style={{ fontSize: 11, color: 'var(--bp-text-faint)' }}>{u.last_login_ip}</div>}
+                            </td>
+                            <td style={td}>
+                              {u.active ? badge(u.sessoes_abertas ? `ativo · ${u.sessoes_abertas} sessão(ões)` : 'ativo', '#10b981') : badge('desativado', '#ef4444')}
+                            </td>
+                            <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                                {u.active && (
+                                  <AcgButton type="button" variant="ghost" disabled={ocupado === u.id} onClick={() => novaSenha(u)} title="Gerar senha provisória" style={{ padding: '6px 10px', fontSize: 12 }}>
+                                    <i className="fas fa-key"></i>
+                                  </AcgButton>
+                                )}
+                                {!u.eh_voce && (
+                                  <AcgButton type="button" variant={u.active ? 'danger' : 'ghost'} disabled={ocupado === u.id}
+                                    onClick={() => { if (!u.active || window.confirm(`Desativar o acesso de ${u.name}? As sessões abertas serão encerradas na hora.`)) alterar(u, { active: !u.active }, u.active ? `${u.name} desativado` : `${u.name} reativado`); }}
+                                    title={u.active ? 'Desativar acesso' : 'Reativar acesso'} style={{ padding: '6px 10px', fontSize: 12 }}>
+                                    <i className={`fas ${u.active ? 'fa-user-slash' : 'fa-user-check'}`}></i>
+                                  </AcgButton>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <form onSubmit={criar} style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18 }}>
+                <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 4px' }}><i className="fas fa-user-plus" style={{ color: ACG_ACCENT, marginRight: 8 }}></i>Novo usuário</p>
+                <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, margin: '0 0 14px', lineHeight: 1.5 }}>O sistema gera uma senha provisória; a pessoa cria a dela no primeiro login.</p>
+                <AcgInput label="Nome" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Ex.: Maria da Silva" required />
+                <AcgInput label="Login" value={form.login} onChange={e => setForm({ ...form, login: e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, '') })} placeholder="ex.: maria" hint="Letras minúsculas, números, ponto, traço ou sublinhado." autoCapitalize="none" required />
+                <AcgSelect label="Papel" value={form.role} onChange={e => setForm({ ...form, role: e.target.value })}>
+                  <option value="caixa">Caixa — vende, emite NFC-e, gaveta, clientes e fiado</option>
+                  <option value="dono">Dono — acesso a tudo, inclusive esta tela</option>
+                </AcgSelect>
+                <AcgButton type="submit" disabled={criando || form.name.trim().length < 2 || form.login.length < 3} style={{ width: '100%' }}>
+                  {criando ? 'Criando...' : 'Criar e gerar senha provisória'}
+                </AcgButton>
+              </form>
+            </div>
+          )}
+
+          {aba === 'acessos' && (
+            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, overflow: 'hidden' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', borderBottom: '1px solid var(--bp-border)' }}>
+                <span style={{ color: 'var(--bp-text-faint)', fontSize: 12 }}>Os 150 eventos mais recentes: logins, tentativas com senha errada, saídas e alterações na equipe.</span>
+                <AcgButton type="button" variant="ghost" onClick={loadAcessos} style={{ padding: '6px 10px', fontSize: 12 }}><i className="fas fa-rotate-right" style={{ marginRight: 6 }}></i>Atualizar</AcgButton>
+              </div>
+              {!acessos ? <AcgSpinner /> : acessos.length === 0 ? (
+                <p style={{ color: 'var(--bp-text-faint)', fontSize: 13, textAlign: 'center', padding: 32, margin: 0 }}>Nenhum acesso registrado ainda.</p>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead><tr><th style={th}>Quando</th><th style={th}>Evento</th><th style={th}>Quem</th><th style={th}>Detalhe</th><th style={th}>Dispositivo</th><th style={th}>IP</th></tr></thead>
+                    <tbody>
+                      {acessos.map(a => {
+                        const [rotulo, cor] = ACG_EVENTOS_ACESSO[a.evento] || [a.evento, 'var(--bp-text-muted)'];
+                        return (
+                          <tr key={a.id}>
+                            <td style={{ ...td, whiteSpace: 'nowrap', fontSize: 12.5 }}>{acgDataHora(a.created_at)}</td>
+                            <td style={td}>{badge(rotulo, cor)}</td>
+                            <td style={td}><div style={{ fontWeight: 600 }}>{a.usuario_nome || '—'}</div><div className="mono" style={{ fontSize: 11, color: 'var(--bp-text-faint)' }}>{a.login}</div></td>
+                            <td style={{ ...td, color: 'var(--bp-text-muted)', fontSize: 12.5 }}>{a.detalhe || ''}</td>
+                            <td style={{ ...td, color: 'var(--bp-text-muted)', fontSize: 12.5 }}>{a.dispositivo}</td>
+                            <td style={{ ...td, fontSize: 12 }}><span className="mono">{a.ip || '—'}</span></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ---- MINHA CONTA (todo mundo): nome, senha e sessões abertas ---- */
+    function AcougueMinhaConta({ showToast, user, onUserChange, onLogout }) {
+      const [nome, setNome] = useState(user.name || '');
+      const [salvandoNome, setSalvandoNome] = useState(false);
+      const [atual, setAtual] = useState('');
+      const [nova, setNova] = useState('');
+      const [confirma, setConfirma] = useState('');
+      const [verSenhas, setVerSenhas] = useState(false);
+      const [trocando, setTrocando] = useState(false);
+      const [sessoes, setSessoes] = useState(null);
+      const [me, setMe] = useState(null);
+
+      const loadSessoes = async () => { const res = await apiCall('GET', '/me/sessions'); if (res.ok) setSessoes(res.data); };
+      useEffect(() => { loadSessoes(); apiCall('GET', '/me').then(res => { if (res.ok) setMe(res.data); }); }, []);
+
+      const salvarNome = async (e) => {
+        e.preventDefault();
+        if (nome.trim().length < 2) { showToast('Informe o nome.', 'error'); return; }
+        setSalvandoNome(true);
+        const res = await apiCall('PATCH', '/me', { name: nome.trim() });
+        setSalvandoNome(false);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível salvar', 'error'); return; }
+        onUserChange?.({ name: res.data.name });
+        showToast('Nome atualizado');
+      };
+
+      const senhaOk = REGRAS_SENHA.every(r => r.ok(nova)) && nova === confirma;
+      const trocarSenha = async (e) => {
+        e.preventDefault();
+        if (!atual) { showToast('Informe a senha atual.', 'error'); return; }
+        if (!senhaOk) { showToast('Confira os itens da lista.', 'error'); return; }
+        setTrocando(true);
+        const res = await apiCall('PUT', '/auth/password', { old_password: atual, new_password: nova });
+        setTrocando(false);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível trocar a senha', 'error'); return; }
+        setAtual(''); setNova(''); setConfirma('');
+        showToast('Senha alterada. As outras sessões foram encerradas.');
+        loadSessoes();
+      };
+
+      const encerrar = async (s) => {
+        const res = await apiCall('DELETE', `/me/sessions/${s.id}`);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível encerrar', 'error'); return; }
+        showToast('Sessão encerrada');
+        loadSessoes();
+      };
+      const encerrarOutras = async () => {
+        const res = await apiCall('DELETE', '/me/sessions');
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível encerrar', 'error'); return; }
+        showToast(res.data.message);
+        loadSessoes();
+      };
+
+      const cartao = { background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18 };
+      const titulo = (icone, texto) => <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 14px' }}><i className={`fas ${icone}`} style={{ color: ACG_ACCENT, marginRight: 8 }}></i>{texto}</p>;
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-circle-user" title="Minha Conta" subtitle="Seus dados, sua senha e onde a sua conta está aberta" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 18, alignItems: 'start' }}>
+            <form onSubmit={salvarNome} style={cartao}>
+              {titulo('fa-id-badge', 'Dados do acesso')}
+              <div style={{ display: 'grid', gap: 6, marginBottom: 14, fontSize: 13 }}>
+                <div><span style={{ color: 'var(--bp-text-faint)' }}>Login: </span><span className="mono" style={{ color: 'var(--bp-text)' }}>{user.email}</span></div>
+                <div><span style={{ color: 'var(--bp-text-faint)' }}>Papel: </span><span style={{ color: ACG_ACCENT, fontWeight: 600 }}>{user.role_label || ACG_ROTULO_PAPEL[ACG_PAPEL(user.role)]}</span></div>
+                <div><span style={{ color: 'var(--bp-text-faint)' }}>Último acesso: </span><span style={{ color: 'var(--bp-text)' }}>{acgDataHora(me?.last_login_at)}{me?.last_login_ip ? ` · ${me.last_login_ip}` : ''}</span></div>
+                <div><span style={{ color: 'var(--bp-text-faint)' }}>Senha alterada em: </span><span style={{ color: 'var(--bp-text)' }}>{acgDataHora(me?.password_changed_at)}</span></div>
+              </div>
+              <AcgInput label="Nome" value={nome} onChange={e => setNome(e.target.value)} />
+              <AcgButton type="submit" disabled={salvandoNome || nome.trim() === (user.name || '')}>{salvandoNome ? 'Salvando...' : 'Salvar nome'}</AcgButton>
+            </form>
+
+            <form onSubmit={trocarSenha} style={cartao}>
+              {titulo('fa-key', 'Trocar a senha')}
+              <AcgInput label="Senha atual" type={verSenhas ? 'text' : 'password'} value={atual} onChange={e => setAtual(e.target.value)} autoComplete="current-password" />
+              <AcgInput label="Nova senha" type={verSenhas ? 'text' : 'password'} value={nova} onChange={e => setNova(e.target.value)} autoComplete="new-password" />
+              <AcgInput label="Confirme a nova senha" type={verSenhas ? 'text' : 'password'} value={confirma} onChange={e => setConfirma(e.target.value)} autoComplete="new-password" />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--bp-text-muted)', fontSize: 12.5, marginBottom: 10, cursor: 'pointer' }}>
+                <input type="checkbox" checked={verSenhas} onChange={e => setVerSenhas(e.target.checked)} style={{ accentColor: ACG_ACCENT }} />Mostrar as senhas
+              </label>
+              <ChecklistSenha senha={nova} confirma={confirma} />
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11.5, margin: '0 0 12px', lineHeight: 1.5 }}>Ao trocar, todas as outras sessões abertas com a sua conta são encerradas. Esta continua.</p>
+              <AcgButton type="submit" disabled={trocando || !atual || !senhaOk}>{trocando ? 'Trocando...' : 'Trocar senha'}</AcgButton>
+            </form>
+
+            <div style={cartao}>
+              {titulo('fa-laptop', 'Sessões abertas')}
+              {!sessoes ? <AcgSpinner /> : (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {sessoes.map(s => (
+                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--bp-card)', border: `1px solid ${s.atual ? ACG_ACCENT + '66' : 'var(--bp-border)'}` }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ color: 'var(--bp-text)', fontSize: 13, fontWeight: 600 }}>{s.device}{s.atual && <span style={{ color: ACG_ACCENT, fontSize: 11, marginLeft: 6 }}>esta sessão</span>}</div>
+                        <div style={{ color: 'var(--bp-text-faint)', fontSize: 11.5 }}>desde {acgDataHora(s.created_at)} · visto {acgDataHora(s.last_seen_at)}{s.ip ? ` · ${s.ip}` : ''}</div>
+                      </div>
+                      {s.atual
+                        ? <AcgButton type="button" variant="ghost" onClick={onLogout} style={{ padding: '6px 10px', fontSize: 12 }}>Sair</AcgButton>
+                        : <AcgButton type="button" variant="danger" onClick={() => encerrar(s)} style={{ padding: '6px 10px', fontSize: 12 }}>Encerrar</AcgButton>}
+                    </div>
+                  ))}
+                  {sessoes.length > 1 && (
+                    <AcgButton type="button" variant="ghost" onClick={encerrarOutras} style={{ marginTop: 4 }}><i className="fas fa-power-off" style={{ marginRight: 6 }}></i>Encerrar todas as outras sessões</AcgButton>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     /* ---- SHELL PRINCIPAL ---- */
-    function AcougueDashboard({ user, onLogout }) {
-      const ACG_NAV = useAcougueNav();
-      const [activeView, setActiveView] = useState('inicio');
+    function AcougueDashboard({ user, onLogout, onUserChange }) {
+      const papel = ACG_PAPEL(user.role);
+      const ACG_NAV = useAcougueNav(papel);
+      // Caixa abre direto no Caixa: é a única tela pra qual ele veio.
+      const [activeView, setActiveView] = useState(papel === 'caixa' ? 'caixa' : 'inicio');
       const [toast, setToast] = useState(null);
       const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
       const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+      // Papel mudou (o dono rebaixou/promoveu com a pessoa logada): a tela que estava aberta
+      // pode ter deixado de existir pra ela.
+      useEffect(() => { if (!ACG_NAV.some(n => n.id === activeView)) setActiveView(ACG_NAV[0]?.id || 'caixa'); }, [papel]);
 
       const showToast = (msg, type = 'success') => setToast({ msg, type });
       const viewLabel = ACG_NAV.find(n => n.id === activeView)?.label || '';
       const collapsed = sidebarCollapsed && !mobileSidebarOpen;
       const w = collapsed ? 64 : 230;
       const ownerName = user.name || 'Açougue';
+      const rotuloPapel = user.role_label || ACG_ROTULO_PAPEL[papel];
 
       return (
         <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--bp-bg)', position: 'relative' }}>
@@ -3083,10 +3430,11 @@
               </nav>
               <div style={{ padding: '12px 8px', borderTop: '1px solid var(--bp-border)' }}>
                 {!collapsed && (
-                  <div style={{ padding: '8px 10px', marginBottom: 8, borderRadius: 8, background: 'var(--bp-card)' }}>
-                    <p style={{ color: 'var(--bp-text)', fontSize: 13, fontWeight: 600, margin: 0 }}>{ownerName}</p>
-                    <p style={{ color: ACG_ACCENT, fontSize: 11, margin: 0 }}>Açougue</p>
-                  </div>
+                  <button type="button" onClick={() => { setActiveView('conta'); setMobileSidebarOpen(false); }} title="Minha Conta"
+                    style={{ width: '100%', textAlign: 'left', padding: '8px 10px', marginBottom: 8, borderRadius: 8, background: 'var(--bp-card)', border: `1px solid ${activeView === 'conta' ? ACG_ACCENT + '66' : 'transparent'}`, cursor: 'pointer', fontFamily: 'Inter, sans-serif' }}>
+                    <p style={{ color: 'var(--bp-text)', fontSize: 13, fontWeight: 600, margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ownerName}</p>
+                    <p style={{ color: ACG_ACCENT, fontSize: 11, margin: 0 }}>{rotuloPapel}</p>
+                  </button>
                 )}
                 <button onClick={onLogout} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 13 }}>
                   <i className="fas fa-sign-out-alt" style={{ fontSize: 15, flexShrink: 0, width: 18, textAlign: 'center' }}></i>
@@ -3127,6 +3475,8 @@
                 : activeView === 'relatorios' ? <AcougueRelatorios showToast={showToast} />
                 : activeView === 'impostos' ? <AcougueImpostos showToast={showToast} />
                 : activeView === 'config' ? <AcougueConfig showToast={showToast} />
+                : activeView === 'equipe' ? <AcougueEquipe showToast={showToast} user={user} />
+                : activeView === 'conta' ? <AcougueMinhaConta showToast={showToast} user={user} onUserChange={onUserChange} onLogout={onLogout} />
                 : null}
             </main>
           </div>

@@ -15,6 +15,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const webpush = require('web-push');
 const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 require('dotenv').config();
 const focusNfe = require('./focus-nfe');
 const scaleBarcode = require('./scale-barcode');
@@ -24,9 +25,24 @@ const precificacao = require('./precificacao');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'defina-JWT_SECRET-no-env-antes-de-produzir';
 const pkg = require('./package.json');
 const serverStartedAt = new Date();
+
+// Sem fallback. O valor antigo ('defina-JWT_SECRET-no-env-antes-de-produzir') era público — está
+// no histórico deste repositório — e valia como segredo de verdade sempre que a variável
+// faltasse: qualquer pessoa assinava um token de dono e entrava. O .env.example já pedia pra
+// trocar; pedir não segura ninguém. Sem JWT_SECRET o processo não sobe, e o motivo fica no log.
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 24) {
+  console.error('\nJWT_SECRET ausente ou curto demais (mínimo 24 caracteres). Defina no .env — veja .env.example.\n');
+  process.exit(1);
+}
+
+// Atrás do ALB (deploy/setup-alb.sh) toda requisição chega do IP do balanceador. Sem isto o
+// express-rate-limit contava as tentativas de login da LOJA INTEIRA num balde só: dez senhas
+// erradas de uma pessoa trancavam o caixa pra todo mundo por 15 minutos. E o IP gravado no
+// histórico de acessos seria sempre o mesmo, inútil pra saber de onde veio uma tentativa.
+app.set('trust proxy', 1);
 
 // ─── Log do sistema (buffer em memória, mais recente primeiro) ───────────────
 const SYSTEM_LOG_MAX = 200;
@@ -60,7 +76,19 @@ if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
 }
 webpush.setVapidDetails('mailto:contato@reidascarnes.com.br', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
-app.use(cors());
+// CSP desligada de propósito: React, Babel e Tailwind vêm de CDN e o JSX é compilado no próprio
+// navegador com script inline — uma política que permitisse isso não protegeria nada. Os outros
+// cabeçalhos (nosniff, frameguard, HSTS, referrer-policy) valem e não custam nada.
+app.use(helmet({ contentSecurityPolicy: false }));
+
+// Só a própria origem (o front é servido daqui) e o que estiver em ALLOWED_ORIGINS. O `cors()`
+// pelado respondia `*` pra qualquer site.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors((req, cb) => {
+  const origin = req.headers.origin;
+  const propria = `${req.protocol}://${req.get('host')}`;
+  cb(null, { origin: !origin || origin === propria || allowedOrigins.includes(origin) });
+}));
 app.use(express.json({ limit: '15mb' }));
 // Sem cache-control explícito, o navegador pode reaproveitar (via ETag) uma resposta antiga de
 // GET para a mesma URL — grave numa API cujos dados mudam a cada venda (ex:
@@ -566,14 +594,52 @@ async function initDatabase() {
   // sem precisar do try/catch de "duplicate column" que o sqlite3 exigia.
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'dark'");
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password INTEGER DEFAULT 0');
+  // Equipe com papéis e rastro de acesso (ver "Middlewares de autenticação").
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS active INTEGER NOT NULL DEFAULT 1');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip TEXT');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP');
+  // O papel único 'acougue' vira 'dono'. Quem já existe continua entrando com tudo liberado;
+  // 'caixa' só nasce quando o dono cadastra alguém em Equipe.
+  await pool.query("UPDATE users SET role = 'dono' WHERE role = 'acougue'");
+
+  // Sessão por login: o JWT sozinho não sabe ser revogado. "Sair", trocar a senha, desativar um
+  // funcionário — tudo isso precisa derrubar o acesso NA HORA, não dali a 7 dias.
+  await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    jti TEXT UNIQUE NOT NULL,
+    device TEXT,
+    ip TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMP
+  )`);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_abertas ON sessions(user_id) WHERE revoked_at IS NULL');
+
+  // Histórico de acessos: quem entrou, quando, de onde, e as tentativas que falharam. O log em
+  // memória (systemLog) some no restart e nenhuma tela o lia.
+  await pool.query(`CREATE TABLE IF NOT EXISTS auth_events (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    login TEXT,
+    evento TEXT NOT NULL,
+    ip TEXT,
+    user_agent TEXT,
+    detalhe TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_auth_events_recentes ON auth_events(created_at DESC)');
 
   // Seed inicial - só insere se não existir
-  // Usuário do módulo açougue (login: reidascarnes / senha: reidascarnes). O campo `email` do
-  // login aceita qualquer string única — não precisa ter formato de e-mail real.
-  const acougueOwnerPassword = bcrypt.hashSync('reidascarnes', 10);
+  // Dono do açougue (login: reidascarnes / senha: reidascarnes). O campo `email` do login aceita
+  // qualquer string única — não precisa ter formato de e-mail real. Nasce com
+  // must_change_password = 1: a senha padrão está no README, então o primeiro login é obrigado a
+  // trocá-la antes de ver qualquer tela. Instalação antiga (linha já existente) não é alterada.
+  const acougueOwnerPassword = bcrypt.hashSync('reidascarnes', 12);
   await pool.query(
-    `INSERT INTO users (name, email, password, role) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO NOTHING`,
-    ['Rei das Carnes', 'reidascarnes', acougueOwnerPassword, 'acougue']
+    `INSERT INTO users (name, email, password, role, must_change_password) VALUES ($1, $2, $3, $4, 1) ON CONFLICT (email) DO NOTHING`,
+    ['Rei das Carnes', 'reidascarnes', acougueOwnerPassword, 'dono']
   );
 
   // Configurações fiscais do açougue (chave/valor na mesma tabela `settings`, prefixo
@@ -668,24 +734,76 @@ async function initDatabase() {
 
 
 // ─── Middlewares de autenticação ────────────────────────────────────────────
+//
+// Papéis:
+//   dono  — tudo: fiscal, estoque, relatórios, configurações e a equipe.
+//   caixa — o balcão: vender, emitir a NFC-e da venda, gaveta, clientes/fiado, conferir etiqueta.
+// Existia só 'acougue', um login pra loja inteira. O `created_by` que já estava nas tabelas de
+// venda, gaveta e sangria era sempre o mesmo número — rastro nenhum de QUEM fez o quê. O papel
+// antigo é migrado para 'dono' no boot (initDatabase).
+const PAPEIS = ['dono', 'caixa'];
+const ROTULO_PAPEL = { dono: 'Dono', caixa: 'Caixa' };
+const BCRYPT_COST = 12;
+const MSG_INDISPONIVEL = 'Serviço indisponível no momento. Tente novamente em instantes.';
 
-const verifyToken = (req, res, next) => {
+// Rotas que uma sessão com senha provisória ainda pode usar: só o necessário pra trocá-la.
+const PERMITIDO_COM_SENHA_PROVISORIA = /^\/api\/(auth\/(password|logout)|me)$/;
+
+const sessaoEncerrada = (res) => res.status(401).json({ error: 'Sessão encerrada. Entre de novo.', code: 'sessao_encerrada' });
+
+// Fail-closed: token sem jti (emitido por uma versão anterior), sem linha em `sessions`, revogado
+// ou de usuário desativado = 401. O JWT sozinho não basta mais — "Sair", a troca de senha e a
+// desativação de um funcionário precisam derrubar o acesso NA HORA, e antes não derrubavam: o
+// token de 7 dias seguia valendo em qualquer aba onde tivesse sido copiado.
+//
+// Erro do BANCO não é 401. O front trata 401 com sessão como logout (limpa e recarrega), e um
+// soluço do Aurora mandaria o caixa inteiro pra tela de login no meio da fila. É 503.
+const verifyToken = async (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Token não fornecido' });
+  let decoded;
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
+    decoded = jwt.verify(token, JWT_SECRET);
   } catch {
-    res.status(401).json({ error: 'Token inválido' });
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+  if (!decoded.jti) return sessaoEncerrada(res);
+  try {
+    const { rows: [sessao] } = await pool.query(
+      `SELECT s.revoked_at, u.role, u.name, u.email, u.active, u.must_change_password
+         FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.jti = $1 AND s.user_id = $2`,
+      [decoded.jti, decoded.id]
+    );
+    if (!sessao || sessao.revoked_at) return sessaoEncerrada(res);
+    if (!sessao.active) {
+      return res.status(403).json({ error: 'Este acesso foi desativado. Fale com o dono do açougue.', code: 'usuario_desativado' });
+    }
+    // Papel e nome saem do BANCO, não do token: rebaixar um caixa ou renomear alguém vale na
+    // hora, sem esperar o token vencer.
+    req.user = {
+      id: decoded.id, email: sessao.email, name: sessao.name, role: sessao.role, jti: decoded.jti,
+      must_change_password: !!sessao.must_change_password,
+    };
+    if (req.user.must_change_password && !PERMITIDO_COM_SENHA_PROVISORIA.test(req.originalUrl.split('?')[0])) {
+      return res.status(403).json({ error: 'Defina uma senha nova antes de continuar.', code: 'senha_provisoria' });
+    }
+    pool.query('UPDATE sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE jti = $1', [decoded.jti]).catch(() => {});
+    next();
+  } catch (err) {
+    logEvent('ERROR', 'Não foi possível verificar a sessão: {erro}', { erro: err.message });
+    res.status(503).json({ error: MSG_INDISPONIVEL, code: 'db_unavailable' });
   }
 };
 
 const verifyRole = (roles) => (req, res, next) => {
   if (!roles.includes(req.user.role)) {
-    return res.status(403).json({ error: 'Acesso negado' });
+    return res.status(403).json({ error: 'Acesso negado', code: 'sem_permissao' });
   }
   next();
 };
+
+const donoOnly = [verifyToken, verifyRole(['dono'])];
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -694,49 +812,275 @@ const loginLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: (req, res) => ({ error: 'Muitas tentativas de login. Tente novamente em alguns minutos.' }),
+  message: (req, res) => ({ error: 'Muitas tentativas de login. Tente novamente em alguns minutos.', code: 'muitas_tentativas' }),
   skipSuccessfulRequests: true,
 });
 
-app.post('/api/auth/login', loginLimiter, (req, res) => {
-  const { email, password } = req.body;
-  db.get('SELECT * FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))', [email || ''], (err, user) => {
-    if (err || !user) {
-      logEvent('WARN', 'Tentativa de login inválida ({email})', { email: email || '—' });
-      return res.status(401).json({ error: 'Usuário não encontrado' });
-    }
-    if (!bcrypt.compareSync(password, user.password)) {
-      logEvent('WARN', 'Tentativa de login inválida ({email})', { email });
-      return res.status(401).json({ error: 'Senha incorreta' });
-    }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+// Política de senha — validada AQUI. A checagem da tela é conveniência; a regra é esta.
+function problemasDaSenha(senha) {
+  const s = String(senha || '');
+  const p = [];
+  if (s.length < 8) p.push('ao menos 8 caracteres');
+  if (!/[a-zA-Z]/.test(s)) p.push('uma letra');
+  if (!/[0-9]/.test(s)) p.push('um número');
+  if (s.length > 128) p.push('no máximo 128 caracteres');
+  return p;
+}
+
+// Senha provisória: 10 caracteres sem 0/O, 1/l/I — ela vai ser ditada ou anotada num papel no
+// balcão, e "é zero ou é ó?" é o tipo de dúvida que faz a pessoa desistir e ficar sem acesso.
+// Sempre com letra e número, pra passar na política quando for trocada.
+function gerarSenhaProvisoria() {
+  const alfabeto = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  for (;;) {
+    const bytes = crypto.randomBytes(10);
+    let s = '';
+    for (let i = 0; i < 10; i++) s += alfabeto[bytes[i] % alfabeto.length];
+    if (/[a-zA-Z]/.test(s) && /[0-9]/.test(s)) return s;
+  }
+}
+
+// Comparação feita mesmo quando o login não existe, contra este hash: sem isso a resposta do
+// login inexistente voltava em 1 ms e a do login errado em 250 ms — o tempo denunciava quais
+// logins existem, e a mensagem única não adiantava nada.
+const HASH_DE_COMPARACAO = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), BCRYPT_COST);
+
+function dispositivoDe(ua) {
+  if (!ua) return 'Dispositivo desconhecido';
+  let navegador = 'Navegador';
+  if (/Edg\//.test(ua)) navegador = 'Edge';
+  else if (/OPR\//.test(ua)) navegador = 'Opera';
+  else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) navegador = 'Chrome';
+  else if (/Firefox\//.test(ua)) navegador = 'Firefox';
+  else if (/Safari\//.test(ua) && !/Chrome/.test(ua)) navegador = 'Safari';
+  let so = 'SO desconhecido';
+  if (/Windows/.test(ua)) so = 'Windows';
+  else if (/Mac OS X/.test(ua)) so = 'macOS';
+  else if (/Android/.test(ua)) so = 'Android';
+  else if (/iPhone|iPad|iPod/.test(ua)) so = 'iOS';
+  else if (/Linux/.test(ua)) so = 'Linux';
+  return `${navegador} · ${so}`;
+}
+
+async function registrarAcesso(evento, { userId = null, login = null, req, detalhe = null }) {
+  try {
+    await pool.query(
+      'INSERT INTO auth_events (user_id, login, evento, ip, user_agent, detalhe) VALUES ($1,$2,$3,$4,$5,$6)',
+      [userId, login, evento, req.ip || null, String(req.headers['user-agent'] || '').slice(0, 200), detalhe]
     );
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, phone: user.phone, theme: user.theme || 'dark', must_change_password: !!user.must_change_password } });
-  });
+  } catch (err) {
+    logEvent('WARN', 'Não deu para gravar o evento de acesso {evento}: {erro}', { evento, erro: err.message });
+  }
+}
+
+async function abrirSessao(req, user, lembrar) {
+  const jti = crypto.randomUUID();
+  await pool.query('INSERT INTO sessions (user_id, jti, device, ip) VALUES ($1,$2,$3,$4)',
+    [user.id, jti, dispositivoDe(req.headers['user-agent']), req.ip || null]);
+  // "Manter conectado" = 7 dias; sem marcar, um turno (12h). Num PDV o navegador é da loja, não
+  // da pessoa: quanto menos o token vale depois que ela foi embora, melhor.
+  return jwt.sign({ id: user.id, jti }, JWT_SECRET, { expiresIn: lembrar ? '7d' : '12h' });
+}
+
+const usuarioParaResposta = (u) => ({
+  id: u.id, name: u.name, email: u.email, role: u.role, role_label: ROTULO_PAPEL[u.role] || u.role,
+  phone: u.phone, theme: u.theme || 'dark', must_change_password: !!u.must_change_password,
+  last_login_at: u.last_login_at || null,
 });
 
-
-app.post('/api/auth/reset-password', (req, res) => {
-  const { email, newPassword } = req.body;
-  if (!email || !newPassword) {
-    return res.status(400).json({ error: 'Campos obrigatórios faltando' });
-  }
-  if (newPassword.length < 8) {
-    return res.status(400).json({ error: 'A senha deve ter no mínimo 8 caracteres' });
-  }
-  db.get('SELECT * FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))', [email], (err, user) => {
-    if (err || !user) {
-      return res.status(404).json({ error: 'Nenhuma conta encontrada com esse e-mail' });
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
+  const login = String(req.body.email ?? req.body.login ?? '').trim().toLowerCase();
+  const senha = String(req.body.password ?? '');
+  const lembrar = req.body.remember === true;
+  // Uma mensagem só. "Usuário não encontrado" vs "Senha incorreta" contava, pra quem estivesse
+  // tentando, quais logins existem — e o login padrão está no README.
+  const invalido = () => res.status(401).json({ error: 'Usuário ou senha incorretos.', code: 'credenciais_invalidas' });
+  if (!login || !senha) return invalido();
+  try {
+    const { rows: [user] } = await pool.query('SELECT * FROM users WHERE LOWER(TRIM(email)) = $1', [login]);
+    let confere = false;
+    if (user && user.password) confere = bcrypt.compareSync(senha, user.password);
+    else bcrypt.compareSync(senha, HASH_DE_COMPARACAO);
+    if (!confere) {
+      await registrarAcesso('login_falhou', { userId: user?.id || null, login, req });
+      logEvent('WARN', 'Tentativa de login inválida ({login})', { login });
+      return invalido();
     }
-    const hashedPassword = bcrypt.hashSync(newPassword, 10);
-    db.run('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, user.id], (err2) => {
-      if (err2) return res.status(500).json({ error: 'Erro ao redefinir senha' });
-      res.json({ message: 'Senha redefinida com sucesso' });
-    });
-  });
+    if (!user.active) {
+      await registrarAcesso('login_recusado_inativo', { userId: user.id, login, req });
+      return res.status(403).json({ error: 'Este acesso foi desativado. Fale com o dono do açougue.', code: 'usuario_desativado' });
+    }
+    const token = await abrirSessao(req, user, lembrar);
+    await pool.query('UPDATE users SET last_login_at = CURRENT_TIMESTAMP, last_login_ip = $2 WHERE id = $1', [user.id, req.ip || null]);
+    await registrarAcesso('login', { userId: user.id, login, req, detalhe: lembrar ? 'manter conectado' : null });
+    res.json({ token, user: usuarioParaResposta(user) });
+  } catch (err) {
+    logEvent('ERROR', 'Falha no login de {login}: {erro}', { login, erro: err.message });
+    res.status(503).json({ error: MSG_INDISPONIVEL, code: 'db_unavailable' });
+  }
+});
+
+app.post('/api/auth/logout', verifyToken, async (req, res) => {
+  try {
+    await pool.query('UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE jti = $1 AND revoked_at IS NULL', [req.user.jti]);
+    await registrarAcesso('logout', { userId: req.user.id, login: req.user.email, req });
+    res.json({ ok: true });
+  } catch (err) {
+    logEvent('WARN', 'Falha ao revogar a sessão no logout: {erro}', { erro: err.message });
+    res.json({ ok: false });
+  }
+});
+
+// Nome do açougue e versão pra tela de login — sem token, porque é antes do login. Só isso sai:
+// CNPJ, endereço e o resto continuam atrás de autenticação.
+app.get('/api/branding', async (req, res) => {
+  try {
+    const { rows: [r] } = await pool.query("SELECT value FROM settings WHERE key = 'acougue_business_name'");
+    res.json({ nome: (r?.value || '').trim() || 'Rei das Carnes', versao: pkg.version });
+  } catch {
+    res.json({ nome: 'Rei das Carnes', versao: pkg.version });
+  }
+});
+
+// ─── Sessões da própria pessoa ────────────────────────────────────────────────
+
+app.get('/api/me/sessions', verifyToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, jti, device, ip, created_at, last_seen_at FROM sessions
+        WHERE user_id = $1 AND revoked_at IS NULL ORDER BY last_seen_at DESC NULLS LAST, created_at DESC`, [req.user.id]);
+    res.json(rows.map(s => ({ id: s.id, device: s.device, ip: s.ip, created_at: s.created_at, last_seen_at: s.last_seen_at, atual: s.jti === req.user.jti })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/me/sessions/:id', verifyToken, async (req, res) => {
+  try {
+    const { rows: [s] } = await pool.query('SELECT jti FROM sessions WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+    if (!s) return res.status(404).json({ error: 'Sessão não encontrada' });
+    if (s.jti === req.user.jti) return res.status(400).json({ error: 'Esta é a sessão atual — use Sair.' });
+    await pool.query('UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Sessão encerrada' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/me/sessions', verifyToken, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND jti <> $2 AND revoked_at IS NULL', [req.user.id, req.user.jti]);
+    await registrarAcesso('sessoes_encerradas', { userId: req.user.id, login: req.user.email, req, detalhe: `${rowCount} sessão(ões)` });
+    res.json({ message: rowCount ? `${rowCount} outra(s) sessão(ões) encerrada(s)` : 'Não havia outra sessão aberta', encerradas: rowCount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Equipe (só o dono) ───────────────────────────────────────────────────────
+
+const LOGIN_RE = /^[a-z0-9._-]{3,40}$/;
+
+app.get('/api/usuarios/acessos', ...donoOnly, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT e.id, e.evento, e.login, e.ip, e.user_agent, e.detalhe, e.created_at, u.name AS usuario_nome
+         FROM auth_events e LEFT JOIN users u ON u.id = e.user_id
+        ORDER BY e.created_at DESC LIMIT 150`);
+    res.json(rows.map(r => ({ ...r, dispositivo: dispositivoDe(r.user_agent), user_agent: undefined })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/usuarios', ...donoOnly, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.name, u.email AS login, u.role, u.active, u.must_change_password, u.password,
+              u.last_login_at, u.last_login_ip, u.created_at,
+              (SELECT COUNT(*)::int FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS sessoes_abertas
+         FROM users u ORDER BY u.active DESC, u.role, u.name`);
+    res.json(rows.map(u => ({
+      id: u.id, name: u.name, login: u.login, role: u.role, role_label: ROTULO_PAPEL[u.role] || u.role,
+      active: !!u.active, must_change_password: !!u.must_change_password,
+      last_login_at: u.last_login_at, last_login_ip: u.last_login_ip, created_at: u.created_at,
+      sessoes_abertas: u.sessoes_abertas, eh_voce: u.id === req.user.id,
+      // A senha padrão está no README. Enquanto alguém entrar com ela, a tela de Equipe avisa.
+      senha_padrao: u.login === 'reidascarnes' && !!u.password && bcrypt.compareSync('reidascarnes', u.password),
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/usuarios', ...donoOnly, async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const login = String(req.body.login || '').trim().toLowerCase();
+  const role = String(req.body.role || 'caixa');
+  if (name.length < 2) return res.status(400).json({ error: 'Informe o nome.' });
+  if (!LOGIN_RE.test(login)) {
+    return res.status(400).json({ error: 'O login precisa ter de 3 a 40 caracteres: letras minúsculas, números, ponto, traço ou sublinhado.' });
+  }
+  if (!PAPEIS.includes(role)) return res.status(400).json({ error: 'Papel inválido.' });
+  const senha = gerarSenhaProvisoria();
+  try {
+    const { rows: [u] } = await pool.query(
+      `INSERT INTO users (name, email, password, role, must_change_password, active) VALUES ($1,$2,$3,$4,1,1) RETURNING id`,
+      [name, login, bcrypt.hashSync(senha, BCRYPT_COST), role]);
+    await registrarAcesso('usuario_criado', { userId: req.user.id, login: req.user.email, req, detalhe: `${login} (${ROTULO_PAPEL[role]})` });
+    // A senha provisória aparece UMA vez, nesta resposta. Não fica guardada em lugar nenhum
+    // legível — quem perder pede outra em "Nova senha provisória".
+    res.status(201).json({ id: u.id, name, login, role, role_label: ROTULO_PAPEL[role], senha_provisoria: senha });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Já existe um usuário com esse login.' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/usuarios/:id', ...donoOnly, async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const { rows: [alvo] } = await pool.query('SELECT id, name, role, active FROM users WHERE id = $1', [id]);
+    if (!alvo) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    const name = req.body.name !== undefined ? String(req.body.name).trim() : alvo.name;
+    const role = req.body.role !== undefined ? String(req.body.role) : alvo.role;
+    const active = req.body.active !== undefined ? (req.body.active ? 1 : 0) : alvo.active;
+    if (name.length < 2) return res.status(400).json({ error: 'Informe o nome.' });
+    if (!PAPEIS.includes(role)) return res.status(400).json({ error: 'Papel inválido.' });
+
+    // Trancar a própria porta: quem se rebaixa ou se desativa não tem mais como desfazer.
+    if (id === req.user.id && (role !== alvo.role || active !== alvo.active)) {
+      return res.status(400).json({ error: 'Você não pode alterar o próprio papel nem desativar o próprio acesso.' });
+    }
+    // Nem deixar a loja sem dono nenhum.
+    if (alvo.role === 'dono' && (role !== 'dono' || !active)) {
+      const { rows: [{ donos }] } = await pool.query("SELECT COUNT(*)::int AS donos FROM users WHERE role = 'dono' AND active = 1 AND id <> $1", [id]);
+      if (donos === 0) return res.status(400).json({ error: 'Este é o único dono ativo. Cadastre outro dono antes.' });
+    }
+
+    await pool.query('UPDATE users SET name = $1, role = $2, active = $3 WHERE id = $4', [name, role, active, id]);
+    if (!active) {
+      // Desativou: derruba tudo que estiver aberto em nome dele, agora.
+      await pool.query('UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+      await registrarAcesso('usuario_desativado', { userId: req.user.id, login: req.user.email, req, detalhe: `#${id} ${name}` });
+    } else if (!alvo.active) {
+      await registrarAcesso('usuario_reativado', { userId: req.user.id, login: req.user.email, req, detalhe: `#${id} ${name}` });
+    }
+    if (role !== alvo.role) {
+      await registrarAcesso('papel_alterado', { userId: req.user.id, login: req.user.email, req, detalhe: `#${id} ${name}: ${ROTULO_PAPEL[alvo.role]} → ${ROTULO_PAPEL[role]}` });
+    }
+    res.json({ id, name, role, role_label: ROTULO_PAPEL[role], active: !!active });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Nova senha provisória, entregue pelo dono. Derruba TODAS as sessões do alvo (menos a de quem
+// pediu, se for pra si mesmo — senão ele não conseguiria nem trocar) e obriga a troca no
+// próximo login. Substitui o antigo reset público.
+app.post('/api/usuarios/:id/resetar-senha', ...donoOnly, async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const { rows: [alvo] } = await pool.query('SELECT id, name, email, active FROM users WHERE id = $1', [id]);
+    if (!alvo) return res.status(404).json({ error: 'Usuário não encontrado' });
+    if (!alvo.active) return res.status(400).json({ error: 'Reative o acesso antes de gerar uma senha.' });
+    const senha = gerarSenhaProvisoria();
+    await pool.query('UPDATE users SET password = $1, must_change_password = 1, password_changed_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [bcrypt.hashSync(senha, BCRYPT_COST), id]);
+    await pool.query('UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND revoked_at IS NULL AND jti <> $2', [id, req.user.jti]);
+    await registrarAcesso('senha_provisoria_gerada', { userId: req.user.id, login: req.user.email, req, detalhe: `#${id} ${alvo.name}` });
+    res.json({ id, login: alvo.email, senha_provisoria: senha });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/auth/profile', verifyToken, (req, res) => {
@@ -780,25 +1124,40 @@ app.put('/api/auth/profile', verifyToken, (req, res) => {
   );
 });
 
-app.put('/api/auth/password', verifyToken, (req, res) => {
+// Troca de senha pela própria pessoa. Dois casos, uma rota:
+//   normal — exige a senha atual;
+//   primeiro acesso (must_change_password) — a "atual" é a provisória que o dono entregou e que
+//   acabou de ser conferida no login desta sessão; pedir de novo só atrapalha.
+// Substitui o POST /api/auth/reset-password, que era PÚBLICO: qualquer pessoa trocava a senha de
+// qualquer login só sabendo o nome dele (e o padrão está no README). A rota não existe mais.
+//
+// "Senha atual incorreta" responde 400, não 401: o front trata 401 com sessão como logout.
+app.put('/api/auth/password', verifyToken, async (req, res) => {
   const { old_password, new_password } = req.body;
-  if (!old_password || !new_password) {
-    return res.status(400).json({ error: 'Campos obrigatórios faltando' });
+  const problemas = problemasDaSenha(new_password);
+  if (problemas.length) {
+    return res.status(400).json({ error: `A nova senha precisa ter ${problemas.join(', ')}.`, code: 'senha_fraca' });
   }
-  if (new_password.length < 8) {
-    return res.status(400).json({ error: 'A nova senha deve ter no mínimo 8 caracteres' });
-  }
-  db.get('SELECT * FROM users WHERE id = ?', [req.user.id], (err, user) => {
-    if (err || !user) return res.status(404).json({ error: 'Usuário não encontrado' });
-    if (!bcrypt.compareSync(old_password, user.password)) {
-      return res.status(401).json({ error: 'Senha atual incorreta' });
+  try {
+    const { rows: [user] } = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+    if (!user.must_change_password && (!old_password || !bcrypt.compareSync(String(old_password), user.password || ''))) {
+      return res.status(400).json({ error: 'Senha atual incorreta.', code: 'senha_atual_incorreta' });
     }
-    const hashedPassword = bcrypt.hashSync(new_password, 10);
-    db.run('UPDATE users SET password = ?, must_change_password = 0 WHERE id = ?', [hashedPassword, req.user.id], (err2) => {
-      if (err2) return res.status(500).json({ error: 'Erro ao alterar senha' });
-      res.json({ message: 'Senha alterada com sucesso' });
-    });
-  });
+    if (user.password && bcrypt.compareSync(String(new_password), user.password)) {
+      return res.status(400).json({ error: 'A nova senha precisa ser diferente da atual.', code: 'senha_igual' });
+    }
+    await pool.query('UPDATE users SET password = $1, must_change_password = 0, password_changed_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [bcrypt.hashSync(String(new_password), BCRYPT_COST), req.user.id]);
+    // Derruba as OUTRAS sessões: quem troca a senha por desconfiar de alguém não quer a sessão
+    // desse alguém continuando aberta. A atual fica.
+    await pool.query('UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND jti <> $2 AND revoked_at IS NULL', [req.user.id, req.user.jti]);
+    await registrarAcesso('senha_alterada', { userId: req.user.id, login: req.user.email, req });
+    res.json({ message: 'Senha alterada com sucesso' });
+  } catch (err) {
+    logEvent('ERROR', 'Falha ao alterar a senha de #{id}: {erro}', { id: req.user.id, erro: err.message });
+    res.status(500).json({ error: 'Não foi possível alterar a senha agora.' });
+  }
 });
 
 // ─── Serviços ─────────────────────────────────────────────────────────────────
@@ -840,9 +1199,10 @@ app.put('/api/auth/password', verifyToken, (req, res) => {
 // ─── Usuário logado ───────────────────────────────────────────────────────────
 
 app.get('/api/me', verifyToken, (req, res) => {
-  db.get('SELECT id, name, email, phone, role, document, photo_url, theme, created_at FROM users WHERE id = ?', [req.user.id], (err, user) => {
+  db.get(`SELECT id, name, email, phone, role, document, photo_url, theme, created_at, active, must_change_password,
+                 last_login_at, last_login_ip, password_changed_at FROM users WHERE id = ?`, [req.user.id], (err, user) => {
     if (err || !user) return res.status(404).json({ error: 'Usuário não encontrado' });
-    res.json(user);
+    res.json({ ...user, role_label: ROTULO_PAPEL[user.role] || user.role, active: !!user.active, must_change_password: !!user.must_change_password });
   });
 });
 
@@ -876,10 +1236,18 @@ function isSettingEnabled(key, cb) {
 }
 
 
-// ─── Módulo Açougue (dashboard financeiro/fiscal, role 'acougue') ────────────
-// Todo o sistema roda sob o perfil 'acougue'.
+// ─── Módulo Açougue ───────────────────────────────────────────────────────────
+// `equipe` é o balcão inteiro (dono + caixa); `donoOnly` (definido junto da autenticação) é o
+// que mexe no dinheiro do negócio, no fiscal, no estoque, na configuração e nas pessoas. O nome
+// antigo `acougueOnly` segue existindo como sinônimo de `equipe`: ~70 rotas o usam, e trocar
+// todas de uma vez esconderia no diff as que de fato mudaram de alcance.
+//
+// O que o caixa alcança: produtos (ler e bipar), vendas e a NFC-e da venda, consulta da NFC-e,
+// gaveta, clientes e fiado, conferência de etiqueta e as configurações (só leitura — o cupom
+// impresso precisa do CNPJ e dos atalhos). Todo o resto é do dono.
 
-const acougueOnly = [verifyToken, verifyRole(['acougue'])];
+const equipe = [verifyToken, verifyRole(PAPEIS)];
+const acougueOnly = equipe;
 
 // Campos fiscais do produto que viajam para a NFC-e. Ficam numa lista só porque três lugares
 // precisam da mesma ordem (INSERT, UPDATE e o formulário do front) e divergir entre eles
@@ -1042,7 +1410,7 @@ async function calcApuracao(month, year) {
 }
 
 /* ---- Dashboard ---- */
-app.get('/api/acougue/dashboard', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/dashboard', ...donoOnly, async (req, res) => {
   try {
     const now = new Date();
     const apuracao = await calcApuracao(now.getMonth() + 1, now.getFullYear());
@@ -1143,7 +1511,7 @@ app.get('/api/acougue/products/scan/:code', ...acougueOnly, async (req, res) => 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/products', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/products', ...donoOnly, async (req, res) => {
   const { barcode, scale_code, name, category, unit, price, cost_price, stock_qty } = req.body;
   const fiscal = ACOUGUE_FISCAL_FIELDS.map(f => req.body[f] ?? null);
   if (!name || price === undefined) return res.status(400).json({ error: 'Campos obrigatórios faltando' });
@@ -1165,7 +1533,7 @@ app.post('/api/acougue/products', ...acougueOnly, async (req, res) => {
   }
 });
 
-app.patch('/api/acougue/products/:id', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/products/:id', ...donoOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_products WHERE id = ?', [req.params.id]);
     if (!current) return res.status(404).json({ error: 'Produto não encontrado' });
@@ -1191,7 +1559,7 @@ app.patch('/api/acougue/products/:id', ...acougueOnly, async (req, res) => {
   }
 });
 
-app.delete('/api/acougue/products/:id', ...acougueOnly, async (req, res) => {
+app.delete('/api/acougue/products/:id', ...donoOnly, async (req, res) => {
   try {
     await db.run('UPDATE acougue_products SET active = 0 WHERE id = ?', [req.params.id]);
     res.json({ id: Number(req.params.id), active: 0 });
@@ -1199,7 +1567,7 @@ app.delete('/api/acougue/products/:id', ...acougueOnly, async (req, res) => {
 });
 
 /* ---- Entrada de Carcaça ---- */
-app.get('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/carcass-entries', ...donoOnly, async (req, res) => {
   try {
     const { month, year } = req.query;
     if (month && year) {
@@ -1210,7 +1578,7 @@ app.get('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/carcass-entries', ...donoOnly, async (req, res) => {
   const { supplier_name, supplier_document, animal_type, weight_kg, unit_price, entry_date, notes } = req.body;
   if (!supplier_name || !weight_kg || !unit_price || !entry_date) {
     return res.status(400).json({ error: 'Campos obrigatórios faltando' });
@@ -1225,7 +1593,7 @@ app.post('/api/acougue/carcass-entries', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.patch('/api/acougue/carcass-entries/:id', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/carcass-entries/:id', ...donoOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_carcass_entries WHERE id = ?', [req.params.id]);
     if (!current) return res.status(404).json({ error: 'Registro não encontrado' });
@@ -1240,7 +1608,7 @@ app.patch('/api/acougue/carcass-entries/:id', ...acougueOnly, async (req, res) =
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/acougue/carcass-entries/:id', ...acougueOnly, async (req, res) => {
+app.delete('/api/acougue/carcass-entries/:id', ...donoOnly, async (req, res) => {
   try {
     await db.run('DELETE FROM acougue_carcass_entries WHERE id = ?', [req.params.id]);
     res.json({ id: Number(req.params.id) });
@@ -1248,7 +1616,7 @@ app.delete('/api/acougue/carcass-entries/:id', ...acougueOnly, async (req, res) 
 });
 
 /* ---- Saída de Cortes ---- */
-app.get('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/cuts', ...donoOnly, async (req, res) => {
   try {
     const { month, year } = req.query;
     if (month && year) {
@@ -1262,7 +1630,7 @@ app.get('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
 // Destino 'estoque' soma o peso ao produto vinculado (fica disponível pro caixa); 'venda_direta'
 // e 'perda' não mexem em estoque — o primeiro é saída direta (ex: venda no atacado fora do
 // caixa), o segundo é quebra/descarte. Edições via PATCH não reconciliam estoque retroativamente.
-app.post('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/cuts', ...donoOnly, async (req, res) => {
   const { carcass_entry_id, product_id, cut_name, weight_kg, unit_price, output_date, destination, notes } = req.body;
   if (!cut_name || !weight_kg || !unit_price || !output_date) {
     return res.status(400).json({ error: 'Campos obrigatórios faltando' });
@@ -1281,7 +1649,7 @@ app.post('/api/acougue/cuts', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.patch('/api/acougue/cuts/:id', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/cuts/:id', ...donoOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_cuts WHERE id = ?', [req.params.id]);
     if (!current) return res.status(404).json({ error: 'Registro não encontrado' });
@@ -1296,7 +1664,7 @@ app.patch('/api/acougue/cuts/:id', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/acougue/cuts/:id', ...acougueOnly, async (req, res) => {
+app.delete('/api/acougue/cuts/:id', ...donoOnly, async (req, res) => {
   try {
     await db.run('DELETE FROM acougue_cuts WHERE id = ?', [req.params.id]);
     res.json({ id: Number(req.params.id) });
@@ -1589,7 +1957,7 @@ app.post('/api/acougue/sales/:id/cancel', ...acougueOnly, async (req, res) => {
 });
 
 /* ---- Emissão de Nota (Focus NFe) ---- */
-app.get('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/nfe', ...donoOnly, async (req, res) => {
   try {
     const { type, status } = req.query;
     const conditions = [];
@@ -1603,7 +1971,7 @@ app.get('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
 
 // Sem FOCUS_NFE_TOKEN configurado, a nota fica salva localmente como 'rascunho' — não há
 // nenhuma transmissão à SEFAZ. Ver focus-nfe.js para o que falta pra emissão real funcionar.
-app.post('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/nfe', ...donoOnly, async (req, res) => {
   const { type, ref_type, ref_id, total_value, itens, destinatario, natureza_operacao } = req.body;
   if (!type || !['entrada', 'saida'].includes(type) || !total_value) {
     return res.status(400).json({ error: 'Tipo (entrada/saida) e valor total são obrigatórios' });
@@ -1653,7 +2021,7 @@ app.post('/api/acougue/nfe', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/acougue/nfe/:id', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/nfe/:id', ...donoOnly, async (req, res) => {
   try {
     const invoice = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
     if (!invoice) return res.status(404).json({ error: 'Nota não encontrada' });
@@ -1672,7 +2040,7 @@ app.get('/api/acougue/nfe/:id', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/nfe/:id/cancel', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/nfe/:id/cancel', ...donoOnly, async (req, res) => {
   const { justificativa } = req.body;
   try {
     const invoice = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
@@ -1690,7 +2058,7 @@ app.post('/api/acougue/nfe/:id/cancel', ...acougueOnly, async (req, res) => {
 });
 
 /* ---- PIS / COFINS ---- */
-app.get('/api/acougue/taxes/apuracao', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/taxes/apuracao', ...donoOnly, async (req, res) => {
   try {
     const now = new Date();
     const month = Number(req.query.month) || (now.getMonth() + 1);
@@ -1701,13 +2069,13 @@ app.get('/api/acougue/taxes/apuracao', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/acougue/taxes/periods', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/taxes/periods', ...donoOnly, async (req, res) => {
   try {
     res.json(await db.all('SELECT * FROM acougue_tax_periods ORDER BY ref_year DESC, ref_month DESC', []));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/taxes/periods/close', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/taxes/periods/close', ...donoOnly, async (req, res) => {
   const { month, year } = req.body;
   if (!month || !year) return res.status(400).json({ error: 'Informe mês e ano' });
   try {
@@ -1754,7 +2122,7 @@ app.post('/api/acougue/nfce/:id/consultar', ...acougueOnly, async (req, res) => 
 
 // Cancelamento tem prazo legal (em geral 30 min para NFC-e) e exige justificativa de no
 // mínimo 15 caracteres — a SEFAZ recusa texto curto, então validamos antes de gastar a chamada.
-app.post('/api/acougue/nfce/:id/cancelar', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/nfce/:id/cancelar', ...donoOnly, async (req, res) => {
   const justificativa = String(req.body?.justificativa || '').trim();
   if (justificativa.length < 15) {
     return res.status(400).json({ error: 'A SEFAZ exige justificativa com no mínimo 15 caracteres.' });
@@ -1782,7 +2150,7 @@ app.post('/api/acougue/nfce/:id/cancelar', ...acougueOnly, async (req, res) => {
 /* ---- Inutilização de numeração ---- */
 // Declara à SEFAZ que um intervalo de números não virou nota. Buraco na sequência sem
 // inutilização declarada é achado clássico de auditoria fiscal.
-app.post('/api/acougue/nfce/inutilizar', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/nfce/inutilizar', ...donoOnly, async (req, res) => {
   const { serie, numero_inicial, numero_final, justificativa } = req.body || {};
   const just = String(justificativa || '').trim();
   if (!serie || !numero_inicial || !numero_final) {
@@ -1810,7 +2178,7 @@ app.post('/api/acougue/nfce/inutilizar', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/acougue/nfce/inutilizacoes', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/nfce/inutilizacoes', ...donoOnly, async (req, res) => {
   try {
     const settings = await getAcougueSettingsMap();
     if (!settings.cnpj) return res.status(422).json({ error: 'CNPJ do açougue não configurado.' });
@@ -1821,7 +2189,7 @@ app.get('/api/acougue/nfce/inutilizacoes', ...acougueOnly, async (req, res) => {
 });
 
 /* ---- Carta de correção (apenas NF-e modelo 55) ---- */
-app.post('/api/acougue/nfe/:id/carta-correcao', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/nfe/:id/carta-correcao', ...donoOnly, async (req, res) => {
   const correcao = String(req.body?.correcao || '').trim();
   if (correcao.length < 15) {
     return res.status(400).json({ error: 'A SEFAZ exige texto de correção com no mínimo 15 caracteres.' });
@@ -1850,7 +2218,7 @@ app.post('/api/acougue/nfe/:id/carta-correcao', ...acougueOnly, async (req, res)
 // Notas emitidas em contingência que ainda não foram efetivadas na SEFAZ. Isso é dívida
 // fiscal aberta: a lei dá prazo para transmitir, e passar do prazo gera multa. Por isso fica
 // visível como contador, não escondido num relatório.
-app.get('/api/acougue/nfce/contingencia', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/nfce/contingencia', ...donoOnly, async (req, res) => {
   try {
     const pendentes = await db.all(
       `SELECT i.*, s.sale_number FROM acougue_invoices i
@@ -1871,7 +2239,7 @@ app.get('/api/acougue/nfce/contingencia', ...acougueOnly, async (req, res) => {
 
 // Tenta efetivar (transmitir) uma nota emitida em contingência. Na prática é reconsultar a
 // Focus: ela retransmite as offline assim que a SEFAZ volta, e a consulta revela se já foi.
-app.post('/api/acougue/nfce/:id/efetivar', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/nfce/:id/efetivar', ...donoOnly, async (req, res) => {
   try {
     const nota = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);
     if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
@@ -1941,7 +2309,7 @@ app.post('/api/acougue/products/:id/conferir-plu', ...acougueOnly, async (req, r
 });
 
 /* ---- Produção: ficha técnica e lotes ---- */
-app.get('/api/acougue/recipes', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/recipes', ...donoOnly, async (req, res) => {
   try {
     const receitas = await db.all(
       `SELECT r.*, p.name AS produto, p.unit FROM acougue_recipes r
@@ -1963,7 +2331,7 @@ app.get('/api/acougue/recipes', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/recipes', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/recipes', ...donoOnly, async (req, res) => {
   const { product_id, rendimento_kg, itens, observacao } = req.body || {};
   if (!product_id) return res.status(400).json({ error: 'Informe o produto fabricado.' });
   if (!Array.isArray(itens) || !itens.length) return res.status(400).json({ error: 'Informe ao menos um insumo.' });
@@ -1995,7 +2363,7 @@ app.post('/api/acougue/recipes', ...acougueOnly, async (req, res) => {
 });
 
 // Produzir: consome os insumos, cria o lote e sobe o estoque do produto final.
-app.post('/api/acougue/production', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/production', ...donoOnly, async (req, res) => {
   const { product_id, quantidade, validade } = req.body || {};
   if (!product_id || !(Number(quantidade) > 0)) {
     return res.status(400).json({ error: 'Informe o produto e a quantidade produzida.' });
@@ -2056,7 +2424,7 @@ app.post('/api/acougue/production', ...acougueOnly, async (req, res) => {
 });
 
 // Lotes com validade: o que vence primeiro aparece primeiro.
-app.get('/api/acougue/batches', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/batches', ...donoOnly, async (req, res) => {
   try {
     const lotes = await db.all(
       `SELECT b.*, p.name AS produto, p.unit FROM acougue_batches b
@@ -2078,7 +2446,7 @@ app.get('/api/acougue/batches', ...acougueOnly, async (req, res) => {
 /* ---- Relatórios de gestão ---- */
 // O que o dono precisa saber e hoje só dava para adivinhar: o que vende, o que dá margem,
 // o que está parado e por onde o dinheiro entra.
-app.get('/api/acougue/reports', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/reports', ...donoOnly, async (req, res) => {
   const de = req.query.de || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
   const ate = req.query.ate || new Date().toISOString().slice(0, 10);
   if (de > ate) return res.status(400).json({ error: 'A data inicial não pode ser maior que a final.' });
@@ -2280,7 +2648,7 @@ app.get('/api/acougue/receivables/resumo', ...acougueOnly, async (req, res) => {
 // Responde a pergunta que o dono de açougue não consegue fazer de cabeça: "com os preços
 // que eu pratico, esta carcaça me dá lucro?" O custo aparente da compra engana, porque
 // ~30% da carcaça não vira produto vendável.
-app.get('/api/acougue/pricing/carcass/:id', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/pricing/carcass/:id', ...donoOnly, async (req, res) => {
   try {
     const carcaca = await db.get('SELECT * FROM acougue_carcass_entries WHERE id = ?', [req.params.id]);
     if (!carcaca) return res.status(404).json({ error: 'Entrada de carcaça não encontrada' });
@@ -2404,7 +2772,7 @@ app.get('/api/acougue/cash-session/historico', ...acougueOnly, async (req, res) 
 });
 
 /* ---- Entrada de notas (XML de NF-e do fornecedor) ---- */
-app.get('/api/acougue/purchases', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/purchases', ...donoOnly, async (req, res) => {
   try {
     res.json(await db.all(
       `SELECT id, chave_acesso, numero, serie, emit_nome, emit_cnpj, data_emissao,
@@ -2414,7 +2782,7 @@ app.get('/api/acougue/purchases', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/acougue/purchases/:id', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/purchases/:id', ...donoOnly, async (req, res) => {
   try {
     const nota = await db.get('SELECT * FROM acougue_purchase_invoices WHERE id = ?', [req.params.id]);
     if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
@@ -2427,7 +2795,7 @@ app.get('/api/acougue/purchases/:id', ...acougueOnly, async (req, res) => {
 
 // Importa o XML da nota do fornecedor. O corpo é o texto do XML (Content-Type: text/xml) ou
 // { xml: "..." } em JSON — o front manda o conteúdo do arquivo que o usuário selecionou.
-app.post('/api/acougue/purchases/xml', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/purchases/xml', ...donoOnly, async (req, res) => {
   const xml = typeof req.body === 'string' ? req.body : req.body?.xml;
   if (!xml || typeof xml !== 'string') {
     return res.status(400).json({ error: 'Envie o conteúdo do arquivo XML da nota.' });
@@ -2510,7 +2878,7 @@ app.post('/api/acougue/purchases/xml', ...acougueOnly, async (req, res) => {
 });
 
 // Associa manualmente um item da nota a um produto do cadastro, movimentando o estoque.
-app.patch('/api/acougue/purchases/items/:id', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/purchases/items/:id', ...donoOnly, async (req, res) => {
   const { product_id } = req.body;
   const client = await pool.connect();
   try {
@@ -2534,7 +2902,7 @@ app.patch('/api/acougue/purchases/items/:id', ...acougueOnly, async (req, res) =
 });
 
 /* ---- Câmara fria (quebra de peso) ---- */
-app.get('/api/acougue/cold-storage', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/cold-storage', ...donoOnly, async (req, res) => {
   try {
     const settings = await getAcougueSettingsMap();
     const taxaDia = Number(settings.shrink_pct_day || 0.8);
@@ -2572,7 +2940,7 @@ app.get('/api/acougue/cold-storage', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.patch('/api/acougue/cold-storage/:id', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/cold-storage/:id', ...donoOnly, async (req, res) => {
   const { chamber_in_at, chamber_out_at, weight_out_kg, chamber_notes } = req.body;
   const client = await pool.connect();
   try {
@@ -2631,7 +2999,7 @@ app.patch('/api/acougue/cold-storage/:id', ...acougueOnly, async (req, res) => {
 });
 
 // Livro de movimentação — a visão de controle interno. Filtra por produto, carcaça ou tipo.
-app.get('/api/acougue/stock-movements', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/stock-movements', ...donoOnly, async (req, res) => {
   try {
     const filtros = [];
     const params = [];
@@ -2653,7 +3021,7 @@ app.get('/api/acougue/stock-movements', ...acougueOnly, async (req, res) => {
 /* ---- SPED Fiscal (EFD ICMS/IPI) ---- */
 // Gera o arquivo do período. `download=1` devolve como arquivo .txt; sem isso devolve um
 // resumo em JSON, útil pra conferir os números antes de baixar.
-app.get('/api/acougue/sped/efd-icms-ipi', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/sped/efd-icms-ipi', ...donoOnly, async (req, res) => {
   const mes = Number(req.query.month);
   const ano = Number(req.query.year);
   if (!mes || !ano || mes < 1 || mes > 12) {
@@ -2737,7 +3105,7 @@ app.get('/api/acougue/settings', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.patch('/api/acougue/settings', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/settings', ...donoOnly, async (req, res) => {
   const allowedKeys = ['business_name', 'cnpj', 'ie', 'logradouro', 'numero', 'bairro', 'municipio', 'uf', 'cep', 'regime_tributario', 'pis_rate', 'cofins_rate', 'dressing_pct', 'blood_pct', 'hide_pct', 'head_feet_pct',
     'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type', 'hotkeys', 'shrink_pct_day',
     'nfce_serie_contingencia', 'nfce_proximo_numero_contingencia'];
@@ -2752,13 +3120,13 @@ app.patch('/api/acougue/settings', ...acougueOnly, async (req, res) => {
 });
 
 /* ---- Rendimento de Carcaça (tabela de cortes % editável) ---- */
-app.get('/api/acougue/yield-cuts', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/yield-cuts', ...donoOnly, async (req, res) => {
   try {
     res.json(await db.all('SELECT * FROM acougue_yield_cuts WHERE active = 1 ORDER BY display_order, id', []));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/yield-cuts', ...acougueOnly, async (req, res) => {
+app.post('/api/acougue/yield-cuts', ...donoOnly, async (req, res) => {
   const { name, section, pct_of_carcass } = req.body;
   if (!name || !section || pct_of_carcass === undefined) {
     return res.status(400).json({ error: 'Nome, seção e percentual são obrigatórios' });
@@ -2773,7 +3141,7 @@ app.post('/api/acougue/yield-cuts', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.patch('/api/acougue/yield-cuts/:id', ...acougueOnly, async (req, res) => {
+app.patch('/api/acougue/yield-cuts/:id', ...donoOnly, async (req, res) => {
   try {
     const current = await db.get('SELECT * FROM acougue_yield_cuts WHERE id = ?', [req.params.id]);
     if (!current) return res.status(404).json({ error: 'Corte não encontrado' });
@@ -2787,7 +3155,7 @@ app.patch('/api/acougue/yield-cuts/:id', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/acougue/yield-cuts/:id', ...acougueOnly, async (req, res) => {
+app.delete('/api/acougue/yield-cuts/:id', ...donoOnly, async (req, res) => {
   try {
     await db.run('UPDATE acougue_yield_cuts SET active = 0 WHERE id = ?', [req.params.id]);
     res.json({ id: Number(req.params.id), active: 0 });
@@ -2795,7 +3163,7 @@ app.delete('/api/acougue/yield-cuts/:id', ...acougueOnly, async (req, res) => {
 });
 
 /* ---- Conferência mensal (evitar malha fina: bate registros x notas emitidas) ---- */
-app.get('/api/acougue/reconciliation', ...acougueOnly, async (req, res) => {
+app.get('/api/acougue/reconciliation', ...donoOnly, async (req, res) => {
   try {
     const now = new Date();
     const month = Number(req.query.month) || (now.getMonth() + 1);
@@ -2842,23 +3210,64 @@ app.get('/api/acougue/reconciliation', ...acougueOnly, async (req, res) => {
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', version: '2.1', timestamp: new Date().toISOString() });
+// Toca o banco. Respondia 200 fixo: com o Aurora fora do ar, o ALB continuava mandando gente
+// pra uma instância que só devolvia erro. Com timeout curto — resposta lenta demais também é
+// motivo pra tirar de rotação, e o health check do ALB tem o prazo dele.
+app.get('/api/health', async (req, res) => {
+  const inicio = Date.now();
+  try {
+    await Promise.race([
+      pool.query('SELECT 1'),
+      new Promise((_, rejeita) => setTimeout(() => rejeita(new Error('timeout')), 4000)),
+    ]);
+    res.json({
+      status: 'ok', version: pkg.version, db: 'ok', db_ms: Date.now() - inicio,
+      uptime_s: Math.floor((Date.now() - serverStartedAt.getTime()) / 1000), timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    logEvent('ERROR', 'Health check: o banco não respondeu ({erro})', { erro: err.message });
+    res.status(503).json({ status: 'degraded', version: pkg.version, db: 'erro', timestamp: new Date().toISOString() });
+  }
 });
 
-// ─── SPA fallback — serve index.html para qualquer rota não-API ──────────────
+// ─── Erros que escapam dos handlers ───────────────────────────────────────────
+// Sem isto, um erro num handler async deixava a requisição pendurada (o Express 4 não captura
+// rejeição de Promise) e um erro síncrono devolvia o stack em HTML. E uma rejeição sem catch
+// derrubava o processo inteiro: o systemd sobe de novo em 5 s, mas o caixa perde a venda que
+// estava no meio.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Requisição malformada' });
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'Conteúdo enviado é grande demais' });
+  logEvent('ERROR', 'Erro não tratado em {rota}: {erro}', { rota: `${req.method} ${req.originalUrl}`, erro: err?.message });
+  console.error('Erro não tratado:', err);
+  res.status(500).json({ error: 'Erro interno. Tente de novo; se insistir, avise o suporte.' });
+});
+process.on('unhandledRejection', (razao) => {
+  console.error('Rejeição sem tratamento:', razao);
+  logEvent('ERROR', 'Rejeição sem tratamento: {erro}', { erro: razao?.message || String(razao) });
+});
+process.on('uncaughtException', (err) => {
+  // Aqui não dá pra seguir: o estado do processo é desconhecido. Registra e deixa o systemd
+  // (Restart=always) subir um processo limpo.
+  console.error('Exceção não capturada — encerrando:', err);
+  process.exit(1);
+});
 
-
-initDatabase()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`\n🚀 Rei das Carnes rodando em http://localhost:${PORT}\n`);
-      logEvent('INFO', 'Sistema iniciado');
+// Só escuta quando executado direto (`node server.js`). Os testes importam `app` e sobem o
+// banco por conta própria, sem abrir porta.
+if (require.main === module) {
+  initDatabase()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`\n🚀 Rei das Carnes rodando em http://localhost:${PORT}\n`);
+        logEvent('INFO', 'Sistema iniciado');
+      });
+    })
+    .catch((err) => {
+      console.error('Erro fatal ao inicializar o banco de dados:', err);
+      process.exit(1);
     });
-  })
-  .catch((err) => {
-    console.error('Erro fatal ao inicializar o banco de dados:', err);
-    process.exit(1);
-  });
+}
 
-module.exports = app;
+module.exports = { app, initDatabase, pool };

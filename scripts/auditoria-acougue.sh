@@ -63,6 +63,12 @@ check "desconto negativo"          400 "$(st -X POST $API/api/acougue/sales -H "
 check "desconto maior que a venda" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"desconto\":999999}")"
 check "pagamentos não somam total" 400 "$(st -X POST $API/api/acougue/sales -H "$H" -H "$J" -d "{\"items\":[{\"product_id\":$P,\"quantity\":1}],\"pagamentos\":[{\"forma\":\"pix\",\"valor\":1}]}")"
 
+echo "── PRECIFICAÇÃO ──"
+check "carcaça inexistente"        404 "$(st "$API/api/acougue/pricing/carcass/999999" -H "$H")"
+check "margem acima de 99"         400 "$(st "$API/api/acougue/pricing/carcass/1?margem=150" -H "$H")"
+check "margem negativa"            400 "$(st "$API/api/acougue/pricing/carcass/1?margem=-10" -H "$H")"
+check "análise da carcaça"         200 "$(st "$API/api/acougue/pricing/carcass/1?margem=30" -H "$H")"
+
 echo "── SEGURANÇA ──"
 check "sem token"                  401 "$(st "$API/api/acougue/products")"
 check "token inválido"             401 "$(st "$API/api/acougue/products" -H 'Authorization: Bearer xxx')"

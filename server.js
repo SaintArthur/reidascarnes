@@ -21,6 +21,7 @@ const focusNfe = require('./focus-nfe');
 const scaleBarcode = require('./scale-barcode');
 const nfeXml = require('./nfe-xml');
 const sped = require('./sped');
+const precificacao = require('./precificacao');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -3361,6 +3362,31 @@ app.post('/api/acougue/products/:id/conferir-plu', ...acougueOnly, async (req, r
 
     res.json(await db.get('SELECT id, name, scale_code, plu_confere, plu_observacao FROM acougue_products WHERE id = ?', [req.params.id]));
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ---- Precificação a partir do rendimento ---- */
+// Responde a pergunta que o dono de açougue não consegue fazer de cabeça: "com os preços
+// que eu pratico, esta carcaça me dá lucro?" O custo aparente da compra engana, porque
+// ~30% da carcaça não vira produto vendável.
+app.get('/api/acougue/pricing/carcass/:id', ...acougueOnly, async (req, res) => {
+  try {
+    const carcaca = await db.get('SELECT * FROM acougue_carcass_entries WHERE id = ?', [req.params.id]);
+    if (!carcaca) return res.status(404).json({ error: 'Entrada de carcaça não encontrada' });
+
+    const cortes = await db.all('SELECT name, section, pct_of_carcass FROM acougue_yield_cuts WHERE active = 1 ORDER BY display_order, id', []);
+    const produtos = await db.all("SELECT name, price FROM acougue_products WHERE active = 1 AND unit = 'kg' AND price > 0", []);
+    const margemAlvo = req.query.margem !== undefined ? Number(req.query.margem) : 30;
+    if (!(margemAlvo >= 0 && margemAlvo < 100)) {
+      return res.status(400).json({ error: 'Margem deve estar entre 0 e 99%.' });
+    }
+
+    res.json(precificacao.analisarCarcaca({ carcaca, cortes, produtos, margemAlvo }));
+  } catch (err) {
+    if (err.code === 'DADOS_INSUFICIENTES' || err.code === 'SEM_CORTES') {
+      return res.status(422).json({ error: err.message });
+    }
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* ---- Caixa: sessão, sangria e suprimento ---- */

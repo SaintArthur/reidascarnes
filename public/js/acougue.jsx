@@ -21,6 +21,7 @@
         { id: 'notas-entrada', icon: 'fas fa-file-import', label: 'Entrada de Notas' },
         { id: 'camara', icon: 'fas fa-snowflake', label: 'Câmara Fria' },
         { id: 'rendimento', icon: 'fas fa-calculator', label: 'Rendimento de Carcaça' },
+        { id: 'precificacao', icon: 'fas fa-money-bill-trend-up', label: 'Precificação' },
         { id: 'saida', icon: 'fas fa-drumstick-bite', label: 'Saída de Cortes' },
         { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos' },
         { id: 'conferencia', icon: 'fas fa-clipboard-check', label: 'Conferir Etiquetas' },
@@ -1046,6 +1047,124 @@
       frame.contentWindow.focus();
       frame.contentWindow.print();
       setTimeout(() => frame.remove(), 60000);
+    }
+
+    /* ---- PRECIFICAÇÃO PELO RENDIMENTO ---- */
+    // Responde o que ninguém calcula de cabeça: com os preços praticados, esta carcaça dá
+    // lucro? O custo da compra engana, porque cerca de 30% da carcaça vira osso, sebo e
+    // perda — e o cliente não paga por isso.
+    function AcouguePrecificacao({ showToast }) {
+      const [carcacas, setCarcacas] = useState([]);
+      const [selecionada, setSelecionada] = useState('');
+      const [margem, setMargem] = useState(30);
+      const [analise, setAnalise] = useState(null);
+      const [carregando, setCarregando] = useState(false);
+
+      useEffect(() => {
+        apiCall('GET', '/acougue/carcass-entries').then(r => {
+          if (r.ok) { setCarcacas(r.data); if (r.data[0]) setSelecionada(String(r.data[0].id)); }
+        });
+      }, []);
+
+      const analisar = async () => {
+        if (!selecionada) return;
+        setCarregando(true);
+        const res = await apiCall('GET', `/acougue/pricing/carcass/${selecionada}?margem=${margem}`);
+        setCarregando(false);
+        if (res.ok) setAnalise(res.data);
+        else { setAnalise(null); showToast(res.data?.error || 'Erro ao calcular', 'error'); }
+      };
+      useEffect(() => { if (selecionada) analisar(); }, [selecionada]);
+
+      const Cartao = ({ label, valor, sub, cor }) => (
+        <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 12, padding: '14px 16px' }}>
+          <div style={{ color: 'var(--bp-text-faint)', fontSize: 11, marginBottom: 4 }}>{label}</div>
+          <div className="syne" style={{ color: cor || 'var(--bp-text)', fontWeight: 800, fontSize: 22 }}>{valor}</div>
+          {sub && <div style={{ color: 'var(--bp-text-faint)', fontSize: 11, marginTop: 3 }}>{sub}</div>}
+        </div>
+      );
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-money-bill-trend-up" title="Precificação"
+            subtitle="Quanto a carne realmente custa depois das perdas, e se os preços praticados cobrem isso" />
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <AcgSelect label="Carcaça" value={selecionada} onChange={e => setSelecionada(e.target.value)}>
+                {carcacas.length === 0 && <option value="">nenhuma cadastrada</option>}
+                {carcacas.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {fmtDate(c.entry_date)} — {c.supplier_name} — {c.weight_kg} kg
+                  </option>
+                ))}
+              </AcgSelect>
+              <AcgInput label="Margem desejada (%)" type="number" min="0" max="99" value={margem}
+                onChange={e => setMargem(e.target.value)} hint="margem sobre o preço de venda" />
+            </div>
+            <AcgButton onClick={analisar} disabled={!selecionada || carregando}>
+              {carregando ? 'Calculando...' : 'Recalcular'}
+            </AcgButton>
+          </div>
+
+          {analise && (
+            <>
+              {!analise.tabela_fechada && (
+                <div style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 12, padding: 14, marginBottom: 16 }}>
+                  <p style={{ color: '#ef4444', fontSize: 13, margin: 0 }}>
+                    <i className="fas fa-triangle-exclamation" style={{ marginRight: 6 }}></i>{analise.aviso_tabela}
+                  </p>
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
+                <Cartao label="Custo aparente" valor={fmtCur(analise.custo_aparente_por_kg)} sub="o que parece na nota de compra" />
+                <Cartao label="Custo REAL por kg" valor={fmtCur(analise.custo_real_por_kg)}
+                  sub={`+${analise.diferenca_pct}% depois das perdas`} cor="#f59e0b" />
+                <Cartao label="Peso vendável" valor={`${analise.peso_vendavel} kg`}
+                  sub={`de ${analise.peso_entrada} kg — ${analise.pct_perda}% é perda`} />
+                <Cartao label="Margem atual" valor={analise.margem_atual_pct != null ? `${analise.margem_atual_pct}%` : '—'}
+                  sub={`alvo: ${analise.margem_alvo_pct}%`}
+                  cor={analise.margem_atual_pct == null ? undefined : (analise.margem_atual_pct >= analise.margem_alvo_pct ? '#10b981' : '#ef4444')} />
+              </div>
+
+              <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 16, marginBottom: 16 }}>
+                <p style={{ color: 'var(--bp-text-secondary)', fontSize: 13, margin: 0, lineHeight: 1.6 }}>
+                  Esta carcaça custou <strong>{fmtCur(analise.custo_total)}</strong>. Vendendo todos os cortes
+                  pelos preços de hoje, ela renderia <strong>{fmtCur(analise.receita_esperada)}</strong>
+                  {analise.margem_atual_pct != null && <> — margem de <strong>{analise.margem_atual_pct}%</strong></>}.
+                  {analise.cortes_sem_preco > 0 && (
+                    <span style={{ color: '#f59e0b' }}> {analise.cortes_sem_preco} corte(s) sem preço no catálogo ficaram de fora da conta.</span>
+                  )}
+                </p>
+              </div>
+
+              <AcgTable
+                emptyLabel="Sem cortes"
+                columns={[
+                  { key: 'corte', label: 'Corte' },
+                  { key: 'pct', label: '%', align: 'right', render: r => `${r.pct}%` },
+                  { key: 'kg_esperado', label: 'Kg', align: 'right', render: r => r.kg_esperado.toFixed(2) },
+                  { key: 'custo_rateado', label: 'Custo', align: 'right', render: r => fmtCur(r.custo_rateado) },
+                  { key: 'preco_atual', label: 'Preço hoje', align: 'right', render: r => r.preco_atual != null ? fmtCur(r.preco_atual) : <span style={{ color: '#f59e0b' }}>sem preço</span> },
+                  { key: 'margem_pct', label: 'Margem', align: 'right', render: r => r.margem_pct == null ? '—' : (
+                    <span style={{ color: r.margem_pct < 0 ? '#ef4444' : (r.margem_pct < 15 ? '#f59e0b' : '#10b981') }}>{r.margem_pct}%</span>
+                  ) },
+                  { key: 'preco_sugerido', label: `Sugerido (${analise.margem_alvo_pct}%)`, align: 'right', render: r => r.preco_sugerido != null ? <strong style={{ color: ACG_ACCENT }}>{fmtCur(r.preco_sugerido)}</strong> : '—' },
+                ]}
+                rows={analise.linhas}
+              />
+
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, marginTop: 12, lineHeight: 1.6 }}>
+                <i className="fas fa-circle-info" style={{ marginRight: 5 }}></i>
+                O preço sugerido reajusta todos os cortes pelo mesmo fator, preservando a relação entre eles —
+                picanha continua valendo mais que músculo. Aplicar a mesma margem corte a corte deixaria a
+                picanha barata demais e o músculo caro demais.
+              </p>
+            </>
+          )}
+        </div>
+      );
     }
 
     /* ---- GAVETA DO CAIXA ---- */
@@ -2565,6 +2684,7 @@
                 : activeView === 'notas-entrada' ? <AcougueNotasEntrada showToast={showToast} />
                 : activeView === 'camara' ? <AcougueCamara showToast={showToast} />
                 : activeView === 'rendimento' ? <AcougueRendimento showToast={showToast} />
+                : activeView === 'precificacao' ? <AcouguePrecificacao showToast={showToast} />
                 : activeView === 'saida' ? <AcougueSaida showToast={showToast} />
                 : activeView === 'produtos' ? <AcougueProdutos showToast={showToast} />
                 : activeView === 'conferencia' ? <AcougueConferencia showToast={showToast} />

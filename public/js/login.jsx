@@ -43,14 +43,24 @@
          clamp() em vw para ele crescer no monitor do escritório sem estourar o notebook. */
       .login-logo { display: block; width: clamp(168px, 20vw, 260px); height: auto; border-radius: 24px;
         box-shadow: 0 34px 64px -30px rgba(212,165,116,0.85); }
+      /* A propriedade display vive AQUI, não no style inline de cada bloco. Estilo inline vence
+         media query, então com display:grid / display:flex no JSX o display:none lá embaixo não
+         pegava: no celular a marca ocupava a tela inteira e o formulário nascia abaixo da dobra —
+         quem abria no telefone via um cartaz bonito e nenhum campo para digitar.
+         (Sem crase neste comentário: ele mora dentro de um template literal, e a crase fecha a
+         string. Foi exatamente o que quebrou a tela na primeira tentativa.) */
+      .login-marca-lista { display: grid; gap: 16px; margin-top: 30px; max-width: 440px; }
+      .login-marca-rodape { display: flex; justify-content: space-between; align-items: center;
+        font-size: 11.5px; color: rgba(243,237,228,0.45); margin-top: 32px; }
       @media (max-width: 860px) {
         .login-raiz { grid-template-columns: 1fr; }
-        .login-marca { padding: 26px 24px 20px; }
+        .login-marca { padding: 22px 22px 18px; }
         .login-marca-lista, .login-marca-rodape { display: none; }
-        .login-form-area { padding: 24px 16px 40px; align-items: flex-start; }
+        .login-form-area { padding: 20px 16px 40px; align-items: flex-start; }
         /* No celular a marca divide a tela com o formulário — logo grande aqui empurraria os
            campos para baixo da dobra. */
-        .login-logo { width: 104px; border-radius: 16px; }
+        .login-logo { width: 92px; border-radius: 16px; }
+        .login-titulo { font-size: 21px; }
       }
     `;
 
@@ -156,10 +166,10 @@
                 <div style={{ fontSize: 12, color: 'rgba(243,237,228,0.55)', letterSpacing: '.08em', textTransform: 'uppercase', marginTop: 4 }}>Sistema de gestão do açougue</div>
               </div>
 
-              <h1 className="syne" style={{ fontSize: 'clamp(24px, 2.8vw, 33px)', fontWeight: 700, lineHeight: 1.12, letterSpacing: -0.6, margin: '0 0 14px', maxWidth: 520 }}>
+              <h1 className="syne login-titulo" style={{ fontSize: 'clamp(24px, 2.8vw, 33px)', fontWeight: 700, lineHeight: 1.12, letterSpacing: -0.6, margin: '0 0 14px', maxWidth: 520 }}>
                 O balcão, o fiscal e o estoque<br />no mesmo lugar.
               </h1>
-              <div className="login-marca-lista" style={{ display: 'grid', gap: 16, marginTop: 30, maxWidth: 440 }}>
+              <div className="login-marca-lista">
                 {[
                   ['fa-cash-register', 'Caixa com leitor de balança', 'Bipou a etiqueta, o peso e o preço já entram. Troco, desconto e pagamento dividido.'],
                   ['fa-file-invoice', 'NFC-e a cada venda', 'Emissão, consulta e cancelamento pela Focus NFe, com contingência quando a SEFAZ cai.'],
@@ -176,7 +186,7 @@
               </div>
             </div>
 
-            <div className="login-marca-rodape" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11.5, color: 'rgba(243,237,228,0.45)', marginTop: 32 }}>
+            <div className="login-marca-rodape">
               <span>© {new Date().getFullYear()} {marca.nome}</span>
               {marca.versao && <span className="mono">v{marca.versao}</span>}
             </div>

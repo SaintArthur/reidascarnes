@@ -17,8 +17,15 @@
       .login-raiz { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); background: var(--bp-bg); }
       .login-marca { position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; padding: 44px 48px;
         background: radial-gradient(1200px 600px at -10% -10%, rgba(212,165,116,0.22), transparent 60%), linear-gradient(160deg, #15100a 0%, #0f0f1e 55%, #0b0b16 100%); color: #f3ede4; }
-      .login-marca::after { content: ""; position: absolute; inset: auto -120px -160px auto; width: 420px; height: 420px; border-radius: 50%;
-        border: 1px solid rgba(212,165,116,0.18); box-shadow: inset 0 0 0 40px rgba(212,165,116,0.04); pointer-events: none; }
+      /* Marca d'água: o logo grande e fraco no fundo, no lugar do círculo decorativo que estava
+         aqui. Sangra pela borda de propósito — marca d'água inteira e centralizada lê como
+         "imagem de fundo esticada", não como marca. A máscara radial apaga o disco preto da
+         imagem nas bordas, senão apareceria a emenda de um círculo escuro sobre o fundo. */
+      .login-marca::after { content: ""; position: absolute; right: -54px; bottom: -46px;
+        width: 400px; height: 400px; border-radius: 50%; pointer-events: none; opacity: .13;
+        background: url("/img/logo-rei-das-carnes.webp") center / cover no-repeat;
+        -webkit-mask-image: radial-gradient(circle, #000 50%, transparent 74%);
+        mask-image: radial-gradient(circle, #000 50%, transparent 74%); }
       .login-form-area { display: flex; align-items: center; justify-content: center; padding: 32px 20px; }
       .login-card { width: 100%; max-width: 420px; }
       .login-campo { width: 100%; padding: 13px 44px 13px 44px; border-radius: 12px; border: 1px solid var(--bp-border2); background: var(--bp-card);
@@ -39,10 +46,6 @@
       .login-aviso { display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px; border-radius: 10px; font-size: 13px; line-height: 1.45; }
       .login-marca-item { display: flex; gap: 12px; align-items: flex-start; }
       .login-marca-item i { width: 34px; height: 34px; border-radius: 9px; background: rgba(212,165,116,0.14); color: #d4a574; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
-      /* Redondo: largura e altura iguais + object-fit cover, senão a imagem (1206x1175, quase
-         quadrada) sairia oval. O fundo preto dela vira o disco, e o touro dourado o recorte. */
-      .login-logo { display: block; width: 116px; height: 116px; border-radius: 50%; object-fit: cover;
-        margin-bottom: 20px; box-shadow: 0 18px 42px -20px rgba(212,165,116,0.9); }
       /* A propriedade display vive AQUI, não no style inline de cada bloco. Estilo inline vence
          media query, então com display:grid / display:flex no JSX o display:none lá embaixo não
          pegava: no celular a marca ocupava a tela inteira e o formulário nascia abaixo da dobra —
@@ -59,7 +62,9 @@
         .login-form-area { padding: 20px 16px 40px; align-items: flex-start; }
         /* No celular a marca divide a tela com o formulário — logo grande aqui empurraria os
            campos para baixo da dobra. */
-        .login-logo { width: 88px; height: 88px; margin-bottom: 16px; }
+        /* No celular a metade da marca é uma faixa curta; a marca d'água encolhe junto, senão
+           cobriria o texto em vez de ficar atrás dele. */
+        .login-marca::after { width: 260px; height: 260px; right: -70px; bottom: -80px; opacity: .12; }
         .login-titulo { font-size: 21px; }
       }
     `;
@@ -194,9 +199,6 @@
           <section className="login-form-area">
             <form onSubmit={entrar} className="login-card" noValidate>
               <div style={{ marginBottom: 26 }}>
-                {/* O logo mora AQUI, não na metade da marca: é o primeiro que a pessoa vê antes
-                    de digitar, e no celular a metade da marca encolhe (ver a media query). */}
-                <img src="/img/logo-rei-das-carnes.webp" alt={marca.nome} className="login-logo" />
                 <h2 className="syne" style={{ color: 'var(--bp-text)', fontSize: 24, fontWeight: 700, margin: '0 0 6px', letterSpacing: -0.3 }}>Entrar</h2>
                 <p style={{ color: 'var(--bp-text-faint)', fontSize: 13.5, margin: 0 }}>Use o seu usuário e a sua senha. O acesso é individual.</p>
               </div>

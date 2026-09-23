@@ -1726,6 +1726,74 @@ app.get('/api/acougue/sales', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Histórico completo de vendas, para a tela de Relatórios (do dono). Precisa vir ANTES de
+// '/sales/:id': o Express casa na ordem de declaração, e depois dele "historico" entraria
+// como se fosse um id.
+//
+// Por que é do dono e não do balcão: esta lista é o faturamento do período, venda por venda,
+// com quem operou cada uma — e é de onde se cancela venda fechada. A tela do caixa fica virada
+// para o cliente, então nada disso pode morar lá.
+app.get('/api/acougue/sales/historico', ...donoOnly, async (req, res) => {
+  try {
+    const de = String(req.query.de || '').slice(0, 10);
+    const ate = String(req.query.ate || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(de) || !/^\d{4}-\d{2}-\d{2}$/.test(ate)) {
+      return res.status(400).json({ error: 'Informe o período (de e até) no formato AAAA-MM-DD.' });
+    }
+    const limite = Math.min(Math.max(Number(req.query.limite) || 50, 1), 200);
+    const pulo = Math.max(Number(req.query.pulo) || 0, 0);
+    const busca = String(req.query.q || '').trim();
+
+    // A nota é buscada por LATERAL pegando a MAIS RECENTE: uma venda pode ter uma tentativa que
+    // deu erro e outra autorizada depois, e o que interessa na lista é o estado atual dela.
+    const filtroBusca = busca ? 'AND s.sale_number ILIKE $5' : '';
+    const params = [de, ate, limite, pulo];
+    if (busca) params.push(`%${busca}%`);
+
+    const { rows } = await pool.query(
+      `SELECT s.id, s.sale_number, s.total_value, s.payment_method, s.status, s.created_at,
+              s.desconto, s.acrescimo, s.troco,
+              u.name AS operador, c.nome AS cliente,
+              i.id AS nota_id, i.status AS nota_status, i.numero AS nota_numero, i.serie AS nota_serie,
+              i.danfe_url, i.xml_url, i.chave_acesso, i.error_message AS nota_erro
+         FROM acougue_sales s
+         LEFT JOIN users u ON u.id = s.created_by
+         LEFT JOIN acougue_customers c ON c.id = s.customer_id
+         LEFT JOIN LATERAL (
+           SELECT inv.* FROM acougue_invoices inv
+            WHERE inv.ref_type = 'venda' AND inv.ref_id = s.id
+            ORDER BY inv.id DESC LIMIT 1
+         ) i ON true
+        WHERE s.created_at >= $1::date AND s.created_at < $2::date + INTERVAL '1 day' ${filtroBusca}
+        ORDER BY s.created_at DESC, s.id DESC
+        LIMIT $3 OFFSET $4`,
+      params
+    );
+
+    // O resumo conta o período inteiro, não só a página: quem olha quer saber quantas vendas e
+    // quanto faturou, e paginar não pode mudar esse número.
+    const paramsResumo = busca ? [de, ate, `%${busca}%`] : [de, ate];
+    const { rows: [resumo] } = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE s.status = 'cancelada')::int AS canceladas,
+              COALESCE(SUM(s.total_value) FILTER (WHERE s.status <> 'cancelada'), 0) AS faturamento
+         FROM acougue_sales s
+        WHERE s.created_at >= $1::date AND s.created_at < $2::date + INTERVAL '1 day'
+          ${busca ? 'AND s.sale_number ILIKE $3' : ''}`,
+      paramsResumo
+    );
+
+    res.json({
+      vendas: rows,
+      total: resumo.total,
+      canceladas: resumo.canceladas,
+      faturamento: round2(Number(resumo.faturamento)),
+      tem_mais: pulo + rows.length < resumo.total,
+      focus_configurada: focusNfe.isFocusConfigured(),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/acougue/sales/:id', ...acougueOnly, async (req, res) => {
   try {
     const sale = await db.get('SELECT * FROM acougue_sales WHERE id = ?', [req.params.id]);
@@ -1976,24 +2044,51 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/acougue/sales/:id/cancel', ...acougueOnly, async (req, res) => {
+// Cancelar venda JÁ FECHADA devolve estoque e apaga faturamento — é decisão de dono, não ação
+// de balcão com cliente na frente (por isso saiu da tela do caixa e virou donoOnly).
+app.post('/api/acougue/sales/:id/cancel', ...donoOnly, async (req, res) => {
+  const motivo = String(req.body?.motivo || '').trim();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows: [sale] } = await client.query('SELECT * FROM acougue_sales WHERE id = $1', [req.params.id]);
     if (!sale) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda não encontrada' }); }
     if (sale.status === 'cancelada') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Venda já está cancelada' }); }
+
+    // A venda não pode ser cancelada por baixo de uma nota que a SEFAZ autorizou. Antes isso
+    // passava: o estoque voltava, o faturamento sumia, e a NFC-e continuava valendo lá fora —
+    // documento fiscal dizendo que a venda aconteceu, sem venda nenhuma no sistema. Cancelar a
+    // nota é outro ato, tem prazo legal (30 min) e exige justificativa, então quem decide é o
+    // dono, ciente do prazo.
+    const { rows: [notaViva] } = await client.query(
+      `SELECT id, numero, serie FROM acougue_invoices
+        WHERE ref_type = 'venda' AND ref_id = $1 AND status = 'autorizada'
+        ORDER BY id DESC LIMIT 1`, [sale.id]);
+    if (notaViva) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `Esta venda tem a NFC-e nº ${notaViva.numero || '—'} autorizada na SEFAZ. Cancele a nota antes de cancelar a venda — o prazo legal é de 30 minutos após a emissão.`,
+        code: 'nota_autorizada',
+        nota_id: notaViva.id,
+        nota_numero: notaViva.numero,
+      });
+    }
+
     const { rows: saleItems } = await client.query('SELECT * FROM acougue_sale_items WHERE sale_id = $1', [sale.id]);
     for (const it of saleItems) {
       if (it.product_id) {
         await client.query('UPDATE acougue_products SET stock_qty = stock_qty + $1 WHERE id = $2', [it.quantity, it.product_id]);
         await registrarMovimento(client, {
           productId: it.product_id, tipo: 'cancelamento_venda', quantidade: it.quantity,
-          motivo: `Cancelamento da venda ${sale.sale_number}`, refType: 'venda', refId: sale.id, userId: req.user.id });
+          motivo: motivo ? `Cancelamento da venda ${sale.sale_number}: ${motivo}` : `Cancelamento da venda ${sale.sale_number}`,
+          refType: 'venda', refId: sale.id, userId: req.user.id });
       }
     }
     await client.query("UPDATE acougue_sales SET status = 'cancelada' WHERE id = $1", [sale.id]);
     await client.query('COMMIT');
+    logEvent('WARN', 'Venda {numero} cancelada por {usuario}{motivo}', {
+      numero: sale.sale_number, usuario: req.user.name || req.user.email,
+      motivo: motivo ? ` — ${motivo}` : '' });
     res.json({ id: sale.id, status: 'cancelada' });
   } catch (err) {
     await client.query('ROLLBACK');

@@ -1396,6 +1396,200 @@
               )}
             </>
           )}
+
+          <AcougueHistoricoVendas showToast={showToast} de={de} ate={ate} />
+        </div>
+      );
+    }
+
+    /* ---- HISTÓRICO DE VENDAS (dentro de Relatórios, só do dono) ---- */
+    // Mora aqui, e não no caixa, por dois motivos: a tela do caixa fica virada para o cliente,
+    // e cancelar venda fechada ou emitir nota atrasada é decisão de dono.
+    const ACG_NOTA_ROTULO = {
+      autorizada: ['Autorizada', '#10b981'],
+      processando: ['Processando', '#f59e0b'],
+      rascunho: ['Rascunho', 'var(--bp-text-muted)'],
+      erro: ['Erro', '#ef4444'],
+      cancelada: ['Cancelada', '#ef4444'],
+      denegada: ['Denegada', '#ef4444'],
+    };
+
+    function AcougueHistoricoVendas({ showToast, de, ate }) {
+      const [dados, setDados] = useState(null);
+      const [carregando, setCarregando] = useState(false);
+      const [busca, setBusca] = useState('');
+      const [pulo, setPulo] = useState(0);
+      const [ocupado, setOcupado] = useState(null);
+      const [expandida, setExpandida] = useState(null);
+      const [itens, setItens] = useState({});
+
+      const carregar = async (novoPulo = 0, termo = busca) => {
+        setCarregando(true);
+        const qs = `de=${de}&ate=${ate}&pulo=${novoPulo}&limite=50${termo.trim() ? `&q=${encodeURIComponent(termo.trim())}` : ''}`;
+        const res = await apiCall('GET', `/acougue/sales/historico?${qs}`);
+        setCarregando(false);
+        if (!res.ok) { showToast(res.data?.error || 'Erro ao carregar o histórico', 'error'); return; }
+        setPulo(novoPulo);
+        // "Carregar mais" acumula; filtro novo ou troca de período começa do zero.
+        setDados(d => (novoPulo > 0 && d ? { ...res.data, vendas: [...d.vendas, ...res.data.vendas] } : res.data));
+      };
+      useEffect(() => { carregar(0); }, [de, ate]);
+
+      const verItens = async (venda) => {
+        if (expandida === venda.id) { setExpandida(null); return; }
+        setExpandida(venda.id);
+        if (itens[venda.id]) return;
+        const res = await apiCall('GET', `/acougue/sales/${venda.id}`);
+        if (res.ok) setItens(m => ({ ...m, [venda.id]: res.data.items || [] }));
+      };
+
+      const cancelar = async (venda) => {
+        const motivo = window.prompt(`Cancelar a venda ${venda.sale_number} de ${fmtCur(venda.total_value)}?\n\nO estoque dos itens volta para o saldo. Diga o motivo (fica no histórico de movimentação):`);
+        if (motivo === null) return;
+        setOcupado(venda.id);
+        const res = await apiCall('POST', `/acougue/sales/${venda.id}/cancel`, { motivo });
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível cancelar', 'error'); return; }
+        showToast(`Venda ${venda.sale_number} cancelada — estoque devolvido`, 'info');
+        carregar(0);
+      };
+
+      const emitirNota = async (venda) => {
+        const cpf = window.prompt(`Emitir NFC-e da venda ${venda.sale_number} (${fmtCur(venda.total_value)}).\n\nCPF na nota (deixe vazio para consumidor não identificado):`);
+        if (cpf === null) return;
+        setOcupado(venda.id);
+        const res = await apiCall('POST', `/acougue/sales/${venda.id}/nfce`, cpf.trim() ? { cpf: cpf.trim() } : {});
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível emitir', 'error'); carregar(0); return; }
+        if (res.data.status === 'autorizada') showToast(`NFC-e ${res.data.numero} autorizada`, 'success');
+        else if (res.data.warning) showToast(res.data.warning, 'info');
+        else showToast(`Nota ficou como "${res.data.status}"`, 'info');
+        carregar(0);
+      };
+
+      const th = { textAlign: 'left', padding: '9px 10px', color: 'var(--bp-text-faint)', fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em', borderBottom: '1px solid var(--bp-border)', whiteSpace: 'nowrap' };
+      const td = { padding: '10px', borderBottom: '1px solid var(--bp-border)', fontSize: 12.5, color: 'var(--bp-text)', verticalAlign: 'middle' };
+      const badge = (texto, cor) => <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 999, fontSize: 10.5, fontWeight: 600, color: cor, background: `${cor}1f`, border: `1px solid ${cor}55`, whiteSpace: 'nowrap' }}>{texto}</span>;
+
+      return (
+        <div style={{ marginTop: 26 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+            <div>
+              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 15, margin: '0 0 2px' }}>
+                <i className="fas fa-receipt" style={{ color: ACG_ACCENT, marginRight: 8 }}></i>Histórico de vendas
+              </p>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11.5, margin: 0 }}>
+                Todas as vendas do período acima. É daqui que se cancela venda fechada e se emite nota atrasada.
+              </p>
+            </div>
+            <form onSubmit={e => { e.preventDefault(); carregar(0); }} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input value={busca} onChange={e => setBusca(e.target.value)} placeholder="buscar por nº da venda..."
+                style={{ padding: '8px 11px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12.5, minWidth: 190, fontFamily: 'Inter, sans-serif' }} />
+              <AcgButton type="submit" variant="ghost" style={{ padding: '7px 12px', fontSize: 12 }}><i className="fas fa-magnifying-glass"></i></AcgButton>
+            </form>
+          </div>
+
+          {dados && (
+            <p style={{ color: 'var(--bp-text-muted)', fontSize: 12, margin: '0 0 10px' }}>
+              {dados.total} venda(s) · {fmtCur(dados.faturamento)} faturado
+              {dados.canceladas > 0 && <span style={{ color: '#ef4444' }}> · {dados.canceladas} cancelada(s)</span>}
+              {!dados.focus_configurada && <span style={{ color: '#f59e0b' }}> · Focus NFe não configurada: nota emitida aqui fica como rascunho</span>}
+            </p>
+          )}
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, overflow: 'hidden' }}>
+            {!dados ? <AcgSpinner /> : dados.vendas.length === 0 ? (
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 13, textAlign: 'center', padding: 30, margin: 0 }}>Nenhuma venda no período.</p>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead><tr>
+                    <th style={th}>Nº</th><th style={th}>Quando</th><th style={th}>Operador</th>
+                    <th style={th}>Pagamento</th><th style={{ ...th, textAlign: 'right' }}>Total</th>
+                    <th style={th}>Venda</th><th style={th}>Nota</th><th style={th}></th>
+                  </tr></thead>
+                  <tbody>
+                    {dados.vendas.map(v => {
+                      const cancelada = v.status === 'cancelada';
+                      const [rotuloNota, corNota] = ACG_NOTA_ROTULO[v.nota_status] || [];
+                      const podeEmitir = !cancelada && (!v.nota_status || v.nota_status === 'erro');
+                      return (
+                        <React.Fragment key={v.id}>
+                          <tr style={{ opacity: cancelada ? 0.55 : 1 }}>
+                            <td style={td}><span className="mono" style={{ fontSize: 12 }}>{v.sale_number}</span></td>
+                            <td style={{ ...td, whiteSpace: 'nowrap' }}>{acgDataHora(v.created_at)}</td>
+                            <td style={td}>{v.operador || '—'}{v.cliente && <div style={{ fontSize: 11, color: 'var(--bp-text-faint)' }}>{v.cliente}</div>}</td>
+                            <td style={td}>{acgLabelPagamento(v.payment_method)}</td>
+                            <td style={{ ...td, textAlign: 'right', fontWeight: 700 }}>{fmtCur(v.total_value)}</td>
+                            <td style={td}>{cancelada ? badge('Cancelada', '#ef4444') : badge('Concluída', '#10b981')}</td>
+                            <td style={td}>
+                              {rotuloNota ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                                  {badge(v.nota_numero ? `${rotuloNota} nº ${v.nota_numero}` : rotuloNota, corNota)}
+                                  {v.danfe_url && <a href={v.danfe_url} target="_blank" rel="noopener noreferrer" style={{ color: ACG_ACCENT, fontSize: 11 }}>ver cupom</a>}
+                                  {v.nota_status === 'erro' && v.nota_erro && <span title={v.nota_erro} style={{ color: '#ef4444', fontSize: 10.5, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.nota_erro}</span>}
+                                </div>
+                              ) : <span style={{ color: 'var(--bp-text-faint)', fontSize: 11.5 }}>sem nota</span>}
+                            </td>
+                            <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                                <AcgButton type="button" variant="ghost" onClick={() => verItens(v)} title="Ver os itens" style={{ padding: '5px 9px', fontSize: 11.5 }}>
+                                  <i className={`fas fa-chevron-${expandida === v.id ? 'up' : 'down'}`}></i>
+                                </AcgButton>
+                                {podeEmitir && (
+                                  <AcgButton type="button" variant="ghost" disabled={ocupado === v.id} onClick={() => emitirNota(v)} title="Emitir a NFC-e desta venda" style={{ padding: '5px 9px', fontSize: 11.5 }}>
+                                    <i className="fas fa-file-invoice"></i>
+                                  </AcgButton>
+                                )}
+                                {!cancelada && (
+                                  <AcgButton type="button" variant="danger" disabled={ocupado === v.id} onClick={() => cancelar(v)} title="Cancelar a venda e devolver o estoque" style={{ padding: '5px 9px', fontSize: 11.5 }}>
+                                    <i className="fas fa-ban"></i>
+                                  </AcgButton>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {expandida === v.id && (
+                            <tr>
+                              <td colSpan={8} style={{ ...td, background: 'var(--bp-card)' }}>
+                                {!itens[v.id] ? <span style={{ color: 'var(--bp-text-faint)', fontSize: 12 }}>carregando itens...</span> : (
+                                  <div style={{ display: 'grid', gap: 5 }}>
+                                    {itens[v.id].map(it => (
+                                      <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12 }}>
+                                        <span>{it.product_name}</span>
+                                        <span style={{ color: 'var(--bp-text-muted)' }} className="mono">
+                                          {Number(it.quantity).toFixed(3).replace('.', ',')} × {fmtCur(it.unit_price)} = <strong style={{ color: 'var(--bp-text)' }}>{fmtCur(it.subtotal)}</strong>
+                                        </span>
+                                      </div>
+                                    ))}
+                                    {(Number(v.desconto) > 0 || Number(v.acrescimo) > 0 || Number(v.troco) > 0) && (
+                                      <div style={{ color: 'var(--bp-text-faint)', fontSize: 11.5, borderTop: '1px solid var(--bp-border)', paddingTop: 5 }}>
+                                        {Number(v.desconto) > 0 && <span style={{ marginRight: 12 }}>Desconto {fmtCur(v.desconto)}</span>}
+                                        {Number(v.acrescimo) > 0 && <span style={{ marginRight: 12 }}>Acréscimo {fmtCur(v.acrescimo)}</span>}
+                                        {Number(v.troco) > 0 && <span>Troco {fmtCur(v.troco)}</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {dados?.tem_mais && (
+            <div style={{ textAlign: 'center', marginTop: 12 }}>
+              <AcgButton type="button" variant="ghost" disabled={carregando} onClick={() => carregar(pulo + 50)}>
+                {carregando ? 'Carregando...' : 'Carregar mais vendas'}
+              </AcgButton>
+            </div>
+          )}
         </div>
       );
     }

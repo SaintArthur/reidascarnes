@@ -1506,6 +1506,30 @@
         carregar(0);
       };
 
+      // Cancelar a NOTA na SEFAZ — ato diferente de cancelar a venda. A rota existia no servidor
+      // desde sempre e nenhum botão a chamava: a trava de cancelar venda mandava "cancele a nota
+      // antes" e não havia por onde fazer isso em tela nenhuma.
+      const cancelarNota = async (venda) => {
+        const minutos = Math.floor((Date.now() - new Date(venda.nota_emitida_em).getTime()) / 60000);
+        const foraDoPrazo = minutos >= 30;
+        // O prazo de 30 min é a regra geral da NFC-e, mas quem decide é a SEFAZ do estado —
+        // por isso avisa e deixa tentar, em vez de bloquear por conta própria.
+        const aviso = foraDoPrazo
+          ? `ATENÇÃO: nota emitida há ${minutos} minutos. O prazo de cancelamento da NFC-e é de 30 minutos, então a SEFAZ provavelmente vai recusar. Tentar mesmo assim?\n\n`
+          : `Emitida há ${minutos} min — restam cerca de ${30 - minutos} min do prazo legal.\n\n`;
+        const justificativa = window.prompt(
+          `${aviso}Cancelar na SEFAZ a NFC-e nº ${venda.nota_numero} (venda ${venda.sale_number}).\n\nJustificativa (a SEFAZ exige no mínimo 15 caracteres):`,
+          '');
+        if (justificativa === null) return;
+        if (justificativa.trim().length < 15) { showToast('A SEFAZ exige justificativa com no mínimo 15 caracteres.', 'error'); return; }
+        setOcupado(venda.id);
+        const res = await apiCall('POST', `/acougue/nfce/${venda.nota_id}/cancelar`, { justificativa: justificativa.trim() });
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'A SEFAZ recusou o cancelamento', 'error'); return; }
+        showToast(`NFC-e nº ${venda.nota_numero} cancelada na SEFAZ`, 'success');
+        carregar(0);
+      };
+
       const imprimirDanfe = async (venda) => {
         setOcupado(venda.id);
         const r = await acgImprimirDanfe(venda.nota_id);
@@ -1605,6 +1629,14 @@
                                       <button type="button" onClick={() => baixarXml(v)}
                                         style={{ background: 'none', border: 'none', padding: 0, color: 'var(--bp-text-muted)', fontSize: 11, cursor: 'pointer', textDecoration: 'underline', fontFamily: 'Inter, sans-serif' }}>
                                         XML
+                                      </button>
+                                    )}
+                                    {/* Só para nota autorizada: rascunho não existe na SEFAZ,
+                                        e cancelada ou denegada não se cancela de novo. */}
+                                    {v.nota_status === 'autorizada' && (
+                                      <button type="button" disabled={ocupado === v.id} onClick={() => cancelarNota(v)}
+                                        style={{ background: 'none', border: 'none', padding: 0, color: '#ef4444', fontSize: 11, cursor: 'pointer', textDecoration: 'underline', fontFamily: 'Inter, sans-serif' }}>
+                                        cancelar nota
                                       </button>
                                     )}
                                   </div>

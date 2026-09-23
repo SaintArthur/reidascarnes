@@ -1769,7 +1769,10 @@ app.get('/api/acougue/sales/historico', ...donoOnly, async (req, res) => {
               s.desconto, s.acrescimo, s.troco,
               u.name AS operador, c.nome AS cliente,
               i.id AS nota_id, i.status AS nota_status, i.numero AS nota_numero, i.serie AS nota_serie,
-              i.danfe_url, i.xml_url, i.chave_acesso, i.error_message AS nota_erro
+              i.danfe_url, i.xml_url, i.chave_acesso, i.error_message AS nota_erro,
+              -- A tela precisa disto para dizer quanto falta do prazo: NFC-e se cancela em até
+              -- 30 minutos da emissão, e passado o prazo não existe mais esse caminho.
+              i.created_at AS nota_emitida_em
          FROM acougue_sales s
          LEFT JOIN users u ON u.id = s.created_by
          LEFT JOIN acougue_customers c ON c.id = s.customer_id

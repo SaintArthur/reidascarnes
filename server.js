@@ -2295,7 +2295,7 @@ async function servirArquivoDaNota(req, res, { campo, oQueE, nomeArquivo }) {
   } catch (err) {
     if (err.code === 'FOCUS_NOT_CONFIGURED') return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
     if (err.code === 'FOCUS_URL_INVALIDA') return res.status(422).json({ error: 'O endereço guardado para este arquivo não aponta para a Focus NFe.' });
-    if (err.code === 'FOCUS_NETWORK_ERROR') return res.status(502).json({ error: err.message });
+    if (err.code === 'FOCUS_NETWORK_ERROR' || err.code === 'FOCUS_TIMEOUT') return res.status(502).json({ error: err.message });
     res.status(500).json({ error: err.message });
   }
 }

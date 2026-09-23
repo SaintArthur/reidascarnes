@@ -84,11 +84,12 @@ async function baixarArquivo(url) {
   const auth = Buffer.from(`${FOCUS_NFE_TOKEN}:`).toString('base64');
   let res;
   try {
-    res = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+    res = await fetch(url, {
+      headers: { Authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(TIMEOUT_ARQUIVO_MS),
+    });
   } catch (networkErr) {
-    const err = new Error(`Falha de rede ao buscar o arquivo na Focus NFe: ${networkErr.message}`);
-    err.code = 'FOCUS_NETWORK_ERROR';
-    throw err;
+    throw erroDeRede(networkErr, 'baixar o arquivo', TIMEOUT_ARQUIVO_MS);
   }
   return {
     ok: res.ok,
@@ -96,6 +97,26 @@ async function baixarArquivo(url) {
     contentType: res.headers.get('content-type') || 'application/octet-stream',
     buffer: Buffer.from(await res.arrayBuffer()),
   };
+}
+
+// Quanto o balcão pode esperar. O fetch do Node não tem timeout próprio de requisição — o
+// padrão do undici é 300 s. Sem isto, SEFAZ lenta ou Focus fora do ar congelava a venda por
+// até CINCO MINUTOS: o operador de mão parada, o cliente esperando e a fila atrás.
+//
+// 15 s é generoso para a SEFAZ, que costuma responder em 2 a 5 s. Estourando o prazo, a venda
+// já está gravada e o caminho certo é degradar: sai o comprovante sem valor fiscal e a nota se
+// emite depois pelo histórico — muito melhor que segurar a fila esperando.
+const TIMEOUT_EMISSAO_MS = Number(process.env.FOCUS_TIMEOUT_MS) || 15000;
+const TIMEOUT_ARQUIVO_MS = Number(process.env.FOCUS_TIMEOUT_ARQUIVO_MS) || 10000;
+
+function erroDeRede(e, oQue, ms) {
+  // AbortError é o estouro do prazo; o resto é rede mesmo (DNS, recusa, cabo).
+  const estourou = e.name === 'TimeoutError' || e.name === 'AbortError';
+  const err = new Error(estourou
+    ? `A Focus NFe não respondeu em ${Math.round(ms / 1000)}s ao ${oQue}.`
+    : `Falha de rede ao contatar a Focus NFe: ${e.message}`);
+  err.code = estourou ? 'FOCUS_TIMEOUT' : 'FOCUS_NETWORK_ERROR';
+  return err;
 }
 
 async function focusRequest(method, path, body) {
@@ -112,11 +133,10 @@ async function focusRequest(method, path, body) {
       method,
       headers: { 'Content-Type': 'application/json', 'Authorization': `Basic ${auth}` },
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(TIMEOUT_EMISSAO_MS),
     });
   } catch (networkErr) {
-    const err = new Error(`Falha de rede ao contatar a Focus NFe: ${networkErr.message}`);
-    err.code = 'FOCUS_NETWORK_ERROR';
-    throw err;
+    throw erroDeRede(networkErr, 'emitir/consultar a nota', TIMEOUT_EMISSAO_MS);
   }
   let data = {};
   try { data = await res.json(); } catch { /* resposta sem corpo JSON (ex: 204) */ }
@@ -267,7 +287,9 @@ function gerarCodigoUnico(numeroNota) {
 // Nota recusada por dado errado (CST inválido, NCM inexistente), não — em contingência ela
 // seria recusada de novo na efetivação, e aí o cupom já estaria na mão do cliente.
 function deveUsarContingencia(erroOuResultado) {
-  if (erroOuResultado?.code === 'FOCUS_NETWORK_ERROR') return true;
+  // Prazo estourado conta como indisponibilidade: do ponto de vista do balcão, SEFAZ que não
+  // responde em 15 s e SEFAZ fora do ar são a mesma coisa.
+  if (erroOuResultado?.code === 'FOCUS_NETWORK_ERROR' || erroOuResultado?.code === 'FOCUS_TIMEOUT') return true;
   const status = erroOuResultado?.status;
   if (status === 503 || status === 504 || status === 502) return true;
   const msg = String(erroOuResultado?.data?.mensagem_sefaz || erroOuResultado?.data?.mensagem || '').toLowerCase();

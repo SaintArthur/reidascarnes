@@ -39,10 +39,10 @@
       .login-aviso { display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px; border-radius: 10px; font-size: 13px; line-height: 1.45; }
       .login-marca-item { display: flex; gap: 12px; align-items: flex-start; }
       .login-marca-item i { width: 34px; height: 34px; border-radius: 9px; background: rgba(212,165,116,0.14); color: #d4a574; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
-      /* O logo é o herói desta metade da tela: a imagem já é a marca, o texto ao lado só a nomeia.
-         clamp() em vw para ele crescer no monitor do escritório sem estourar o notebook. */
-      .login-logo { display: block; width: clamp(168px, 20vw, 260px); height: auto; border-radius: 24px;
-        box-shadow: 0 34px 64px -30px rgba(212,165,116,0.85); }
+      /* Redondo: largura e altura iguais + object-fit cover, senão a imagem (1206x1175, quase
+         quadrada) sairia oval. O fundo preto dela vira o disco, e o touro dourado o recorte. */
+      .login-logo { display: block; width: 116px; height: 116px; border-radius: 50%; object-fit: cover;
+        margin-bottom: 20px; box-shadow: 0 18px 42px -20px rgba(212,165,116,0.9); }
       /* A propriedade display vive AQUI, não no style inline de cada bloco. Estilo inline vence
          media query, então com display:grid / display:flex no JSX o display:none lá embaixo não
          pegava: no celular a marca ocupava a tela inteira e o formulário nascia abaixo da dobra —
@@ -59,7 +59,7 @@
         .login-form-area { padding: 20px 16px 40px; align-items: flex-start; }
         /* No celular a marca divide a tela com o formulário — logo grande aqui empurraria os
            campos para baixo da dobra. */
-        .login-logo { width: 92px; border-radius: 16px; }
+        .login-logo { width: 88px; height: 88px; margin-bottom: 16px; }
         .login-titulo { font-size: 21px; }
       }
     `;
@@ -157,8 +157,7 @@
           <section className="login-marca" aria-label="Sobre o sistema">
             <div>
               <div style={{ marginBottom: 30 }}>
-                <img src="/img/logo-rei-das-carnes.webp" alt="" className="login-logo" />
-                <div className="syne" style={{ fontSize: 'clamp(22px, 2.4vw, 30px)', fontWeight: 800, letterSpacing: -0.5, lineHeight: 1.05, marginTop: 18 }}>
+                <div className="syne" style={{ fontSize: 'clamp(22px, 2.4vw, 30px)', fontWeight: 800, letterSpacing: -0.5, lineHeight: 1.05 }}>
                   {marca.nome === 'Rei das Carnes'
                     ? <span>REI DAS <span style={{ color: '#d4a574' }}>CARNES</span></span>
                     : <span>{marca.nome}</span>}
@@ -195,6 +194,9 @@
           <section className="login-form-area">
             <form onSubmit={entrar} className="login-card" noValidate>
               <div style={{ marginBottom: 26 }}>
+                {/* O logo mora AQUI, não na metade da marca: é o primeiro que a pessoa vê antes
+                    de digitar, e no celular a metade da marca encolhe (ver a media query). */}
+                <img src="/img/logo-rei-das-carnes.webp" alt={marca.nome} className="login-logo" />
                 <h2 className="syne" style={{ color: 'var(--bp-text)', fontSize: 24, fontWeight: 700, margin: '0 0 6px', letterSpacing: -0.3 }}>Entrar</h2>
                 <p style={{ color: 'var(--bp-text-faint)', fontSize: 13.5, margin: 0 }}>Use o seu usuário e a sua senha. O acesso é individual.</p>
               </div>

@@ -22,6 +22,7 @@ const scaleBarcode = require('./scale-barcode');
 const nfeXml = require('./nfe-xml');
 const sped = require('./sped');
 const precificacao = require('./precificacao');
+const gaveta = require('./gaveta');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -675,6 +676,15 @@ async function initDatabase() {
     // clássica de "número duplicado" na SEFAZ.
     ['acougue_nfce_serie_contingencia', '9'],
     ['acougue_nfce_proximo_numero_contingencia', '1'],
+    // Gaveta de dinheiro: abre por pulso da impressora térmica (cabo RJ11 entre as duas).
+    // Fica desligada por padrão — sem o IP da impressora o comando não tem para onde ir.
+    ['acougue_gaveta_ativa', 'false'],
+    ['acougue_impressora_ip', ''],
+    ['acougue_impressora_porta', '9100'],
+    ['acougue_gaveta_pino', '0'],
+    ['acougue_gaveta_tempo_ligado', '25'],
+    ['acougue_gaveta_tempo_desligado', '250'],
+    ['acougue_gaveta_auto_dinheiro', 'true'],
     ['acougue_shrink_pct_day', '0.8'],
     // Layout da etiqueta da balança (ver scale-barcode.js), conferido numa etiqueta real:
     // 2 + PLU de 6 dígitos + preço total em centavos de 5 dígitos + DV. Se a balança for
@@ -1907,7 +1917,15 @@ app.post('/api/acougue/sales', ...acougueOnly, async (req, res) => {
       savedItems.push({ product_id: ri.product.id, name: ri.product.name, barcode: ri.product.barcode, quantity: ri.quantity, unit_price: ri.product.price, subtotal: ri.subtotal });
     }
     await client.query('COMMIT');
-    res.status(201).json({ ...sale, items: savedItems, pagamentos: listaPagamentos, troco });
+
+    // Gaveta abre sozinha só quando entrou dinheiro em espécie: em cartão ou PIX não há
+    // cédula a guardar nem troco a dar, e abrir à toa expõe o caixa.
+    const cfgGaveta = gaveta.configDeSettings(await getAcougueSettingsMap());
+    const temDinheiro = listaPagamentos.some(pg => pg.forma === 'dinheiro' && pg.valor > 0);
+    res.status(201).json({
+      ...sale, items: savedItems, pagamentos: listaPagamentos, troco,
+      abrir_gaveta: cfgGaveta.ativa && cfgGaveta.abrirNoDinheiro && temDinheiro,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.code === 'BAD_INPUT') return res.status(400).json({ error: err.message });
@@ -2790,6 +2808,48 @@ app.get('/api/acougue/receivables/resumo', ...acougueOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+/* ---- Gaveta de dinheiro (abertura física) ---- */
+// Abre a gaveta mandando o pulso ESC/POS para a impressora. Usada pela tecla de atalho do
+// caixa e, automaticamente, quando a venda é paga em dinheiro.
+//
+// `motivo` entra no log para que uma abertura fora de venda (troco, sangria, conferência)
+// não fique indistinguível das automáticas — gaveta aberta sem venda é o padrão que aparece
+// quando há desvio de caixa.
+app.post('/api/acougue/gaveta/abrir', ...acougueOnly, async (req, res) => {
+  try {
+    const settings = await getAcougueSettingsMap();
+    const cfg = gaveta.configDeSettings(settings);
+    if (!cfg.ativa) {
+      return res.status(422).json({ error: 'A abertura automática da gaveta está desligada. Ative em Configurações.' });
+    }
+
+    const r = await gaveta.abrirGaveta(cfg);
+    const sessao = await db.get('SELECT id FROM acougue_cash_sessions WHERE fechado_em IS NULL', []);
+    if (sessao) {
+      await db.run(
+        'INSERT INTO acougue_cash_movements (session_id, tipo, valor, motivo, created_by) VALUES (?,?,?,?,?)',
+        [sessao.id, 'abertura_gaveta', 0, req.body?.motivo || 'Abertura manual', req.user.id]);
+    }
+    res.json({ ...r, registrado: !!sessao });
+  } catch (err) {
+    const conhecido = ['IMPRESSORA_NAO_CONFIGURADA', 'IMPRESSORA_SEM_RESPOSTA', 'IMPRESSORA_INACESSIVEL'];
+    if (conhecido.includes(err.code)) return res.status(422).json({ error: err.message, code: err.code });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Teste de configuração: manda o pulso sem registrar movimento, para quem está instalando
+// conferir o cabo e o IP sem sujar o histórico da gaveta.
+app.post('/api/acougue/gaveta/testar', ...acougueOnly, async (req, res) => {
+  try {
+    const cfg = gaveta.configDeSettings(await getAcougueSettingsMap());
+    const r = await gaveta.abrirGaveta({ ...cfg, ip: req.body?.ip || cfg.ip, porta: req.body?.porta || cfg.porta });
+    res.json({ ...r, mensagem: 'Comando enviado. Se a gaveta não abriu, confira o cabo entre ela e a impressora.' });
+  } catch (err) {
+    res.status(422).json({ error: err.message, code: err.code || 'ERRO' });
+  }
+});
+
 /* ---- Precificação a partir do rendimento ---- */
 // Responde a pergunta que o dono de açougue não consegue fazer de cabeça: "com os preços
 // que eu pratico, esta carcaça me dá lucro?" O custo aparente da compra engana, porque
@@ -3254,7 +3314,9 @@ app.get('/api/acougue/settings', ...acougueOnly, async (req, res) => {
 app.patch('/api/acougue/settings', ...donoOnly, async (req, res) => {
   const allowedKeys = ['business_name', 'cnpj', 'ie', 'logradouro', 'numero', 'bairro', 'municipio', 'uf', 'cep', 'regime_tributario', 'pis_rate', 'cofins_rate', 'dressing_pct', 'blood_pct', 'hide_pct', 'head_feet_pct',
     'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type', 'hotkeys', 'shrink_pct_day',
-    'nfce_serie_contingencia', 'nfce_proximo_numero_contingencia', 'desconto_pct'];
+    'nfce_serie_contingencia', 'nfce_proximo_numero_contingencia', 'desconto_pct',
+      'gaveta_ativa', 'impressora_ip', 'impressora_porta', 'gaveta_pino',
+      'gaveta_tempo_ligado', 'gaveta_tempo_desligado', 'gaveta_auto_dinheiro'];
   try {
     // Esta rota grava o que chega, como texto. Para o desconto isso não serve: o valor vira
     // dinheiro descontado em toda venda do balcão, e um "110" digitado sem querer zeraria o

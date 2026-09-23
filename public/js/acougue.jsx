@@ -1022,6 +1022,7 @@
       { id: 'suspender',      label: 'Suspender/Retomar' },
       { id: 'remover_item',   label: 'Remover último item' },
       { id: 'cancelar_venda', label: 'Cancelar venda' },
+      { id: 'abrir_gaveta',   label: 'Abrir gaveta' },
     ];
 
     const ACG_HOTKEYS_PADRAO = {
@@ -1031,6 +1032,8 @@
       // é o que trava a fila.
       troco: 'F8', desconto: 'F7',
       cancelar_venda: 'F9', remover_item: 'F10', suspender: 'F12',
+      // F3: F1 é ajuda do navegador e F11 é tela cheia — nenhuma dá para interceptar.
+      abrir_gaveta: 'F3',
     };
 
     // As settings guardam o mapa como texto JSON; se vier corrompido, cai no padrão em vez
@@ -2238,6 +2241,9 @@
           showToast(`Venda ${sale.sale_number} registrada, mas a nota falhou: ${nfce.data?.error || 'erro desconhecido'}`, 'error');
         }
 
+        // O servidor decide se abre, olhando a configuração e as formas de pagamento da venda.
+        if (sale.abrir_gaveta) abrirGaveta(`Venda ${sale.sale_number} em dinheiro`);
+
         const cupom = { sale, items: snapshot, paymentMethod, invoice: autorizada ? nfce.data : null, settings: fiscalSettings };
         ultimaVenda.current = cupom;
         printCupom(cupom);
@@ -2253,6 +2259,14 @@
       // dois casos o operador está com a fila esperando.
       const ultimaVenda = useRef(null);
       const vendaSuspensa = useRef(null);
+
+      // Abre a gaveta física (pulso da impressora). Falha aqui nunca derruba a venda: a
+      // impressora pode estar desligada ou fora da rede, e isso não pode travar o balcão —
+      // a gaveta tem chave, o operador abre na mão.
+      const abrirGaveta = async (motivo) => {
+        const res = await apiCall('POST', '/acougue/gaveta/abrir', { motivo });
+        if (!res.ok) showToast(res.data?.error || 'Não consegui abrir a gaveta', 'error');
+      };
 
       const acoes = {
         foco_codigo: () => inputRef.current?.focus(),
@@ -2326,6 +2340,8 @@
           }
           inputRef.current?.focus();
         },
+
+        abrir_gaveta: () => abrirGaveta('Abertura manual pelo caixa'),
       };
 
       // Atalhos valem em toda a tela do caixa. O preventDefault é essencial: sem ele o F5 do
@@ -3408,6 +3424,40 @@
                   ? `Em uma venda de R$ 100,00 o cliente paga ${fmtCur(100 - Number(form.desconto_pct))}.`
                   : 'Desligado: sem botão de desconto no caixa.'} />
             </div>
+
+            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 4px' }}>Gaveta de dinheiro</p>
+            <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', lineHeight: 1.6 }}>
+              A gaveta é ligada por cabo na impressora térmica e abre quando ela recebe um pulso.
+              Por isso o sistema precisa <strong>alcançar a impressora pela rede</strong> — funciona com o
+              servidor dentro da loja; rodando na nuvem, a impressora fica atrás do roteador do açougue.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+              <AcgSelect label="Abertura pela impressora" value={form.gaveta_ativa || 'false'}
+                onChange={e => setForm({ ...form, gaveta_ativa: e.target.value })}>
+                <option value="false">Desligada</option>
+                <option value="true">Ligada</option>
+              </AcgSelect>
+              <AcgInput label="IP da impressora" value={form.impressora_ip || ''}
+                onChange={e => setForm({ ...form, impressora_ip: e.target.value })} placeholder="ex: 192.168.0.50" />
+              <AcgInput label="Porta" value={form.impressora_porta || '9100'}
+                onChange={e => setForm({ ...form, impressora_porta: e.target.value.replace(/\D/g, '') })} hint="9100 é o padrão" />
+              <AcgSelect label="Pino da gaveta" value={form.gaveta_pino || '0'}
+                onChange={e => setForm({ ...form, gaveta_pino: e.target.value })}>
+                <option value="0">Pino 2 (mais comum)</option>
+                <option value="1">Pino 5</option>
+              </AcgSelect>
+              <AcgSelect label="Abrir sozinha em dinheiro" value={form.gaveta_auto_dinheiro || 'true'}
+                onChange={e => setForm({ ...form, gaveta_auto_dinheiro: e.target.value })}>
+                <option value="true">Sim</option>
+                <option value="false">Não</option>
+              </AcgSelect>
+            </div>
+            <AcgButton type="button" variant="ghost" onClick={async () => {
+              const res = await apiCall('POST', '/acougue/gaveta/testar', { ip: form.impressora_ip, porta: Number(form.impressora_porta) || 9100 });
+              showToast(res.ok ? res.data.mensagem : (res.data?.error || 'Falhou'), res.ok ? 'success' : 'error');
+            }} style={{ marginBottom: 14 }}>
+              <i className="fas fa-vault" style={{ marginRight: 6 }}></i>Testar abertura
+            </AcgButton>
 
             <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 4px' }}>Atalhos do caixa</p>
             <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', lineHeight: 1.5 }}>

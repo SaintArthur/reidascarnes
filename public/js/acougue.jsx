@@ -1680,7 +1680,7 @@
     // Sem sessão de caixa não existe conferência de dinheiro: ninguém sabe se a gaveta bate
     // com o que foi vendido. Fica no topo do Caixa porque o operador precisa ver o estado da
     // gaveta antes de começar a vender, não escondido noutra aba.
-    function AcougueGaveta({ showToast, mostrarValores, onAlternarValores }) {
+    function AcougueGaveta({ showToast }) {
       const [sessao, setSessao] = useState(null);
       const [abrindo, setAbrindo] = useState('');
       const [painel, setPainel] = useState(null);
@@ -1747,41 +1747,27 @@
 
       return (
         <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: mostrarValores ? 12 : 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
             <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: 0 }}>
               <i className="fas fa-cash-register" style={{ marginRight: 8, color: '#10b981' }}></i>
               Caixa aberto — {sessao.vendas} venda(s)
             </p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <AcgButton variant="ghost" onClick={onAlternarValores}
-                title={mostrarValores ? 'Esconder os valores da gaveta' : 'Mostrar os valores da gaveta'}>
-                <i className={`fas ${mostrarValores ? 'fa-eye-slash' : 'fa-eye'}`} style={{ marginRight: 7 }}></i>
-                {mostrarValores ? 'Ocultar valores' : 'Mostrar valores'}
-              </AcgButton>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <AcgButton variant="ghost" onClick={() => setPainel(painel === 'mov' ? null : 'mov')}>Sangria / Suprimento</AcgButton>
               <AcgButton onClick={() => setPainel(painel === 'fechar' ? null : 'fechar')}>Fechar caixa</AcgButton>
             </div>
           </div>
 
-          {mostrarValores ? (
-            <div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
-                <Item label="Abertura" valor={sessao.valor_abertura} />
-                <Item label="Vendas em dinheiro" valor={sessao.total_dinheiro} />
-                <Item label="Outras formas" valor={sessao.total_outras} />
-                <Item label="Sangrias" valor={sessao.sangrias} cor="#ef4444" />
-                <Item label="Esperado na gaveta" valor={sessao.esperado_na_gaveta} cor="#10b981" />
-              </div>
-              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '8px 0 0' }}>
-                Cartão, PIX e vale não passam pela gaveta — entram só como informação.
-              </p>
-            </div>
-          ) : (
-            <p style={{ color: 'var(--bp-text-faint)', fontSize: 11.5, margin: '10px 0 0', display: 'flex', alignItems: 'center', gap: 7 }}>
-              <i className="fas fa-lock" style={{ fontSize: 11 }}></i>
-              Valores ocultos. O caixa segue aberto e registrando normalmente.
-            </p>
-          )}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+            <Item label="Abertura" valor={sessao.valor_abertura} />
+            <Item label="Vendas em dinheiro" valor={sessao.total_dinheiro} />
+            <Item label="Outras formas" valor={sessao.total_outras} />
+            <Item label="Sangrias" valor={sessao.sangrias} cor="#ef4444" />
+            <Item label="Esperado na gaveta" valor={sessao.esperado_na_gaveta} cor="#10b981" />
+          </div>
+          <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '8px 0 0' }}>
+            Cartão, PIX e vale não passam pela gaveta — entram só como informação.
+          </p>
 
           {painel === 'mov' && (
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--bp-border)' }}>
@@ -1839,16 +1825,19 @@
       const [paymentMethod, setPaymentMethod] = useState('dinheiro');
       const [finalizing, setFinalizing] = useState(false);
       const [manualProducts, setManualProducts] = useState([]);
-      // Esta tela fica virada para o CLIENTE, no monitor do balcão. Por isso os valores da
-      // gaveta nascem escondidos: quanto dinheiro vivo existe ali agora não é informação para
-      // quem está do outro lado. Mostrar vira um ato deliberado do operador, e a escolha fica
-      // guardada no navegador daquele caixa — não no banco, porque é preferência da máquina
-      // (o monitor virado para o cliente), não da pessoa que entrou.
-      const [mostrarValores, setMostrarValores] = useState(() => {
-        try { return localStorage.getItem('acg_caixa_valores') === '1'; } catch { return false; }
+      // Esta tela fica virada para o CLIENTE, no monitor do balcão. O painel "Caixa aberto"
+      // mostra quanto dinheiro vivo existe na gaveta agora, e isso não é informação para quem
+      // está do outro lado — por isso ele nasce fora da tela e o operador o traz quando precisa
+      // (abrir, sangrar, fechar), normalmente sem cliente na frente.
+      //
+      // A escolha fica no navegador daquele caixa, não no banco: é preferência da MÁQUINA
+      // (aquele monitor está virado para o cliente), não da pessoa que entrou nela — o mesmo
+      // usuário no computador do escritório quer o painel à vista.
+      const [mostrarGaveta, setMostrarGaveta] = useState(() => {
+        try { return localStorage.getItem('acg_caixa_gaveta') === '1'; } catch { return false; }
       });
-      const alternarValores = () => setMostrarValores(v => {
-        try { localStorage.setItem('acg_caixa_valores', v ? '0' : '1'); } catch {}
+      const alternarGaveta = () => setMostrarGaveta(v => {
+        try { localStorage.setItem('acg_caixa_gaveta', v ? '0' : '1'); } catch {}
         return !v;
       });
       // Razão social, CNPJ, IE e endereço vão no cabeçalho do cupom impresso.
@@ -2073,9 +2062,18 @@
 
       return (
         <div>
-          <AcgSectionTitle icon="fa-cash-register" title="Caixa" subtitle="Leitor de código de barras: escaneie e o item entra automaticamente" />
+          {/* O botão fica AQUI, fora do painel: se morasse dentro dele, desligar esconderia o
+              próprio botão e não haveria como trazer o painel de volta. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <AcgSectionTitle icon="fa-cash-register" title="Caixa" subtitle="Leitor de código de barras: escaneie e o item entra automaticamente" />
+            <AcgButton type="button" variant="ghost" onClick={alternarGaveta} style={{ marginTop: 2 }}
+              title={mostrarGaveta ? 'Tirar o painel do caixa aberto da tela' : 'Trazer o painel do caixa aberto'}>
+              <i className={`fas ${mostrarGaveta ? 'fa-eye-slash' : 'fa-eye'}`} style={{ marginRight: 7 }}></i>
+              {mostrarGaveta ? 'Ocultar caixa aberto' : 'Mostrar caixa aberto'}
+            </AcgButton>
+          </div>
 
-          <AcougueGaveta showToast={showToast} mostrarValores={mostrarValores} onAlternarValores={alternarValores} />
+          {mostrarGaveta && <AcougueGaveta showToast={showToast} />}
 
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)', gap: 16, marginBottom: 24 }}>
             <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>

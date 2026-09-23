@@ -655,6 +655,10 @@ async function initDatabase() {
     ['acougue_municipio', ''],
     ['acougue_uf', ''],
     ['acougue_cep', ''],
+    // Desconto do caixa, em % sobre o total. O operador não digita valor: aperta o botão (ou o
+    // atalho) e aplica ESTE percentual, decidido pelo dono. Campo livre no balcão é onde nasce
+    // "dei um descontinho" que ninguém consegue auditar depois. 0 = desconto desligado.
+    ['acougue_desconto_pct', '0'],
     ['acougue_regime_tributario', 'lucro_real'],
     ['acougue_pis_rate', '1.65'],
     ['acougue_cofins_rate', '7.60'],
@@ -3250,8 +3254,18 @@ app.get('/api/acougue/settings', ...acougueOnly, async (req, res) => {
 app.patch('/api/acougue/settings', ...donoOnly, async (req, res) => {
   const allowedKeys = ['business_name', 'cnpj', 'ie', 'logradouro', 'numero', 'bairro', 'municipio', 'uf', 'cep', 'regime_tributario', 'pis_rate', 'cofins_rate', 'dressing_pct', 'blood_pct', 'hide_pct', 'head_feet_pct',
     'scale_prefix', 'scale_code_digits', 'scale_value_digits', 'scale_value_type', 'hotkeys', 'shrink_pct_day',
-    'nfce_serie_contingencia', 'nfce_proximo_numero_contingencia'];
+    'nfce_serie_contingencia', 'nfce_proximo_numero_contingencia', 'desconto_pct'];
   try {
+    // Esta rota grava o que chega, como texto. Para o desconto isso não serve: o valor vira
+    // dinheiro descontado em toda venda do balcão, e um "110" digitado sem querer zeraria o
+    // total de todo mundo até alguém perceber.
+    if (req.body.desconto_pct !== undefined) {
+      const pct = Number(String(req.body.desconto_pct).replace(',', '.'));
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+        return res.status(400).json({ error: 'O desconto do caixa precisa ser um percentual entre 0 e 100.' });
+      }
+      req.body.desconto_pct = String(round2(pct));
+    }
     for (const key of allowedKeys) {
       if (req.body[key] !== undefined) {
         await db.run('UPDATE settings SET value = ? WHERE key = ?', [String(req.body[key]), `acougue_${key}`]);

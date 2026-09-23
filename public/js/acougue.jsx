@@ -1017,6 +1017,8 @@
       { id: 'cpf_nota',       label: 'CPF na nota' },
       { id: 'finalizar',      label: 'Finalizar venda' },
       { id: 'reimprimir',     label: 'Reimprimir último' },
+      { id: 'troco',          label: 'Calcular troco' },
+      { id: 'desconto',       label: 'Aplicar desconto' },
       { id: 'suspender',      label: 'Suspender/Retomar' },
       { id: 'remover_item',   label: 'Remover último item' },
       { id: 'cancelar_venda', label: 'Cancelar venda' },
@@ -1024,6 +1026,10 @@
 
     const ACG_HOTKEYS_PADRAO = {
       foco_codigo: 'F2', cpf_nota: 'F4', finalizar: 'F5', reimprimir: 'F6',
+      // F7 e F8 estavam livres. Troco e desconto são as duas contas que o operador faz de mão
+      // cheia, com o cliente esperando — tirar a mão do leitor para achar o campo com o mouse
+      // é o que trava a fila.
+      troco: 'F8', desconto: 'F7',
       cancelar_venda: 'F9', remover_item: 'F10', suspender: 'F12',
     };
 
@@ -2013,6 +2019,39 @@
     }
 
     /* ---- CAIXA ---- */
+    // Esta tela é a única com layout de duas colunas rígidas e tipografia enorme, e as duas
+    // coisas quebram em largura estreita: os números do total transbordavam a coluna e a
+    // página ganhava rolagem horizontal. Vai em CSS de verdade porque precisa de media query —
+    // estilo inline não tem como responder à largura da tela.
+    const CAIXA_ESTILOS = `
+      .acg-caixa-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(310px, 0.78fr);
+        gap: 16px; align-items: start; margin-bottom: 16px; }
+      /* O teto é calculado, não escolhido pelo olho: vw mede a JANELA, não esta coluna, então
+         numa tela larga a fonte crescia mais que o painel e o total saía cortado pela metade —
+         justamente o número que a tela existe para mostrar. A coluna tem no mínimo 310px, menos
+         40 de respiro = 270px úteis. O pior caso realista é "R$ 9.999,99" (11 caracteres), que
+         em Syne bold com -2px ocupa cerca de 6em. 270 / 6 = 45px, daí o teto de 44px.
+         O mínimo (28px) ainda é maior que qualquer outro número da tela. */
+      .acg-caixa-total { font-size: clamp(28px, 3.6vw, 44px); letter-spacing: -2px; line-height: 1.05; }
+      .acg-caixa-troco { font-size: clamp(24px, 3vw, 38px); letter-spacing: -1.5px; line-height: 1.05; }
+      /* Linha do item: o nome cede espaço primeiro (min-width 0), os controles não encolhem. */
+      .acg-item-linha { display: flex; align-items: center; gap: 10px; padding: 11px 4px;
+        border-bottom: 1px solid var(--bp-border); }
+      .acg-item-nome { flex: 1 1 120px; min-width: 0; }
+      .acg-item-total { min-width: 88px; text-align: right; font-size: 17px; font-weight: 800; }
+      @media (max-width: 1080px) {
+        .acg-caixa-grid { grid-template-columns: 1fr; }
+        /* Empilhado, o total volta a ter a tela inteira para si — mas o teto continua valendo
+           pelo mesmo motivo, agora contra a largura do celular. */
+        .acg-caixa-total { font-size: clamp(32px, 7.5vw, 46px); }
+        .acg-caixa-troco { font-size: clamp(26px, 6vw, 40px); }
+      }
+      @media (max-width: 560px) {
+        .acg-item-linha { flex-wrap: wrap; }
+        .acg-item-total { min-width: auto; margin-left: auto; }
+      }
+    `;
+
     function AcougueCaixa({ showToast }) {
       const [barcode, setBarcode] = useState('');
       const [cart, setCart] = useState([]);
@@ -2034,6 +2073,18 @@
         try { localStorage.setItem('acg_caixa_gaveta', v ? '0' : '1'); } catch {}
         return !v;
       });
+
+      // O catálogo (quase 200 botões) ocupava o centro da tela o tempo todo, competindo com o
+      // total pela atenção de quem está do outro lado do balcão. Ele é caminho de exceção —
+      // produto sem etiqueta — então nasce recolhido e abre num toque. A escolha também fica
+      // no navegador daquele caixa: quem vende muito item sem código deixa aberto e pronto.
+      const [catalogoAberto, setCatalogoAberto] = useState(() => {
+        try { return localStorage.getItem('acg_caixa_catalogo') === '1'; } catch { return false; }
+      });
+      const alternarCatalogo = () => setCatalogoAberto(v => {
+        try { localStorage.setItem('acg_caixa_catalogo', v ? '0' : '1'); } catch {}
+        return !v;
+      });
       // Razão social, CNPJ, IE e endereço vão no cabeçalho do cupom impresso.
       const [fiscalSettings, setFiscalSettings] = useState(null);
       const [hotkeys, setHotkeys] = useState(ACG_HOTKEYS_PADRAO);
@@ -2043,17 +2094,25 @@
       const [filtroProduto, setFiltroProduto] = useState('');
       // Último item lançado, exibido em destaque no painel lateral.
       const [ultimoItem, setUltimoItem] = useState(null);
-      const [desconto, setDesconto] = useState('');
-      const [acrescimo, setAcrescimo] = useState('');
+      // Desconto é LIGA/DESLIGA, não valor digitado: o percentual é decidido pelo dono em
+      // Configurações e o operador só aplica. Campo livre no balcão é onde nasce o
+      // "descontinho" que ninguém audita depois — e a tela fica virada para o cliente, que
+      // passa a ver um campo editável de dinheiro na frente dele.
+      const [descontoLigado, setDescontoLigado] = useState(false);
       // Quanto o cliente entregou em dinheiro. Só isso permite calcular troco — o erro mais
       // básico que faltava no caixa.
       const [recebido, setRecebido] = useState('');
       const inputRef = useRef(null);
+      const recebidoRef = useRef(null);
 
-      // Total já com desconto e acréscimo, e o troco em cima dele. Ficam derivados (não em
-      // estado) para não existir a possibilidade de o número da tela divergir do que é enviado.
+      // Total já com desconto, e o troco em cima dele. Ficam derivados (não em estado) para não
+      // existir a possibilidade de o número da tela divergir do que é enviado.
+      const descontoPct = Math.min(Math.max(Number(fiscalSettings?.desconto_pct) || 0, 0), 100);
       const totalBruto = cart.reduce((s, c) => s + c.quantity * c.product.price, 0);
-      const totalFinal = Math.max(0, totalBruto - (Number(desconto) || 0) + (Number(acrescimo) || 0));
+      // Arredondado a centavo AQUI: é este valor que vai para o banco e para a nota, e um
+      // desconto de 7,5% sobre 98,68 sem arredondar viajaria com frações de centavo.
+      const valorDesconto = descontoLigado ? Math.round(totalBruto * descontoPct) / 100 : 0;
+      const totalFinal = Math.max(0, totalBruto - valorDesconto);
       const trocoCalculado = (Number(recebido) || 0) - totalFinal;
 
       // Busca por nome ou PLU — o operador que sabe o código digita o número, quem não sabe
@@ -2145,8 +2204,7 @@
         const res = await apiCall('POST', '/acougue/sales', {
           items: cart.map(c => ({ product_id: c.product.id, quantity: c.quantity })),
           payment_method: paymentMethod,
-          desconto: Number(desconto) || 0,
-          acrescimo: Number(acrescimo) || 0,
+          desconto: valorDesconto,
           pagamentos: [{
             forma: paymentMethod,
             valor: Number(totalFinal.toFixed(2)),
@@ -2178,7 +2236,7 @@
         setCart([]);
         setCpfNota('');
         setUltimoItem(null);
-        setDesconto(''); setAcrescimo(''); setRecebido('');
+        setDescontoLigado(false); setRecebido('');
         inputRef.current?.focus();
       };
 
@@ -2206,6 +2264,27 @@
         reimprimir: () => {
           if (!ultimaVenda.current) { showToast('Nenhuma venda para reimprimir', 'info'); return; }
           printCupom(ultimaVenda.current);
+        },
+
+        // Calcular o troco = pular direto para o campo "quanto o cliente deu", já selecionado
+        // para digitar por cima. O troco sai sozinho em corpo grande assim que o número entra.
+        // Força a forma de pagamento para dinheiro: é o único caso em que existe troco, e se o
+        // operador aperta este atalho é porque o cliente estendeu a nota.
+        troco: () => {
+          if (!cart.length) { showToast('Carrinho vazio', 'info'); return; }
+          if (paymentMethod !== 'dinheiro') setPaymentMethod('dinheiro');
+          // setTimeout porque o campo só existe depois do render quando a forma acabou de mudar.
+          setTimeout(() => { recebidoRef.current?.focus(); recebidoRef.current?.select(); }, 0);
+        },
+
+        desconto: () => {
+          if (!descontoPct) { showToast('Nenhum desconto configurado. O dono define o percentual em Configurações.', 'info'); return; }
+          if (!cart.length) { showToast('Carrinho vazio', 'info'); return; }
+          setDescontoLigado(v => {
+            showToast(v ? 'Desconto retirado' : `Desconto de ${descontoPct}% aplicado`, v ? 'info' : 'success');
+            return !v;
+          });
+          inputRef.current?.focus();
         },
 
         // Suspender guarda o carrinho para atender outro cliente (o da frente esqueceu algo,
@@ -2256,6 +2335,7 @@
 
       return (
         <div>
+          <style>{CAIXA_ESTILOS}</style>
           {/* O botão fica AQUI, fora do painel: se morasse dentro dele, desligar esconderia o
               próprio botão e não haveria como trazer o painel de volta. */}
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
@@ -2269,155 +2349,205 @@
 
           {mostrarGaveta && <AcougueGaveta showToast={showToast} />}
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)', gap: 16, marginBottom: 24 }}>
-            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
-              <label style={{ display: 'block', marginBottom: 16 }}>
-                <span style={{ display: 'block', color: 'var(--bp-text-faint)', fontSize: 12, marginBottom: 6 }}>Código de barras</span>
-                <input
-                  ref={inputRef}
-                  autoFocus
-                  value={barcode}
-                  onChange={e => setBarcode(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Aponte o leitor aqui e bipe a etiqueta..."
-                  style={{ width: '100%', padding: '14px 16px', borderRadius: 10, border: `2px solid ${ACG_ACCENT}55`, background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 16, fontFamily: 'DM Mono, monospace', boxSizing: 'border-box' }}
-                />
-              </label>
+          {/* DUAS LEITURAS NA MESMA TELA. O monitor fica virado para o cliente, então cada
+              metade atende um lado: à esquerda o que ele confere (o que entrou, com peso e
+              preço), à direita o que ele veio saber (quanto deu, quanto é o troco). O que é
+              ferramenta do operador — catálogo e atalhos — desceu para baixo da dobra. */}
+          <div className="acg-caixa-grid">
 
-              {cart.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--bp-text-faint)' }}>
-                  <i className="fas fa-barcode" style={{ fontSize: 32, marginBottom: 10, display: 'block' }}></i>
-                  Carrinho vazio — escaneie um produto para começar
+            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, minWidth: 0 }}>
+              <input
+                ref={inputRef}
+                autoFocus
+                value={barcode}
+                onChange={e => setBarcode(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Bipe o produto aqui"
+                aria-label="Código de barras"
+                style={{ width: '100%', padding: '15px 18px', borderRadius: 11, border: `2px solid ${ACG_ACCENT}66`, background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 17, fontFamily: 'DM Mono, monospace', boxSizing: 'border-box' }}
+              />
+
+              {/* O item recém-bipado, logo abaixo do campo e em corpo grande: é aqui que o
+                  cliente confere se o corte e o peso são os dele, no segundo em que acontece.
+                  Ficava na coluna da direita, espremido entre o pagamento e o total. */}
+              {ultimoItem && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap',
+                  background: ACG_ACCENT_BG, border: `1px solid ${ACG_ACCENT}55`, borderRadius: 12, padding: '13px 16px', marginTop: 12 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="syne" style={{ color: 'var(--bp-text)', fontSize: 21, fontWeight: 800, lineHeight: 1.15 }}>{ultimoItem.product.name}</div>
+                    <div className="mono" style={{ color: 'var(--bp-text-secondary)', fontSize: 14, marginTop: 3 }}>
+                      {Number(ultimoItem.quantity).toFixed(3).replace('.', ',')} {ultimoItem.product.unit} × {fmtCur(ultimoItem.product.price)}
+                    </div>
+                  </div>
+                  <div className="syne" style={{ color: ACG_ACCENT, fontSize: 28, fontWeight: 800, letterSpacing: -0.5 }}>
+                    {fmtCur(ultimoItem.quantity * ultimoItem.product.price)}
+                  </div>
                 </div>
-              ) : (
-                <AcgTable
-                  columns={[
-                    { key: 'name', label: 'Produto', render: r => r.product.name },
-                    { key: 'unit', label: 'Un', render: r => r.product.unit },
-                    { key: 'qty', label: 'Qtd', align: 'right', render: r => (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
-                        <button onClick={() => nudgeQty(r.product.id, r.product.unit === 'kg' ? -0.1 : -1)} style={{ width: 24, height: 24, borderRadius: 6, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 13, lineHeight: 1 }}>−</button>
-                        <input type="number" step="0.001" min="0" value={r.quantity} onChange={e => updateQty(r.product.id, Number(e.target.value))} style={{ width: 70, padding: '4px 6px', borderRadius: 6, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', textAlign: 'right' }} />
-                        <button onClick={() => nudgeQty(r.product.id, r.product.unit === 'kg' ? 0.1 : 1)} style={{ width: 24, height: 24, borderRadius: 6, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 13, lineHeight: 1 }}>+</button>
-                      </div>
-                    ) },
-                    { key: 'price', label: 'Preço', align: 'right', render: r => fmtCur(r.product.price) },
-                    { key: 'subtotal', label: 'Subtotal', align: 'right', render: r => fmtCur(r.product.price * r.quantity) },
-                    { key: 'actions', label: '', align: 'right', render: r => <button onClick={() => removeItem(r.product.id)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}><i className="fas fa-times"></i></button> },
-                  ]}
-                  rows={cart}
-                />
               )}
 
-              {manualProducts.length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
-                    <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, margin: 0 }}>Ou toque no produto (sem precisar escanear)</p>
-                    <input
-                      value={filtroProduto}
-                      onChange={e => setFiltroProduto(e.target.value)}
-                      placeholder="filtrar por nome ou PLU..."
-                      style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12, minWidth: 190 }}
-                    />
-                  </div>
-                  {/* Altura limitada com rolagem própria: o catálogo tem quase 200 itens e, solto,
-                      empurrava a barra de atalhos e o resto da tela para fora da vista. */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10, maxHeight: 260, overflowY: 'auto', paddingRight: 4 }}>
-                    {produtosFiltrados.map(p => (
-                      <button key={p.id} onClick={() => addProductToCart(p)} style={{ padding: '14px 10px', borderRadius: 10, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 13, fontWeight: 600, cursor: 'pointer', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }}>
-                        <span>{p.name}</span>
-                        <span style={{ color: ACG_ACCENT, fontWeight: 700 }}>{fmtCur(p.price)}</span>
+              {cart.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '52px 0', color: 'var(--bp-text-faint)' }}>
+                  <i className="fas fa-barcode" style={{ fontSize: 34, marginBottom: 12, display: 'block', opacity: 0.6 }}></i>
+                  <span style={{ fontSize: 14 }}>Passe o primeiro produto no leitor</span>
+                </div>
+              ) : (
+                /* Linhas altas em vez de tabela: a leitura é do outro lado do balcão, em
+                   monitor barato de PDV. Nome grande em cima, quantidade × preço embaixo,
+                   subtotal à direita — a mesma ordem do cupom que ele vai receber. */
+                <div style={{ marginTop: 14, maxHeight: 340, overflowY: 'auto' }}>
+                  {cart.map(r => (
+                    <div key={r.product.id} className="acg-item-linha">
+                      <div className="acg-item-nome">
+                        <div style={{ color: 'var(--bp-text)', fontSize: 15, fontWeight: 600, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.product.name}</div>
+                        <div className="mono" style={{ color: 'var(--bp-text-faint)', fontSize: 12.5, marginTop: 2 }}>
+                          {Number(r.quantity).toFixed(3).replace('.', ',')} {r.product.unit} × {fmtCur(r.product.price)}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <button onClick={() => nudgeQty(r.product.id, r.product.unit === 'kg' ? -0.1 : -1)} aria-label="Diminuir"
+                          style={{ width: 32, height: 32, borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>−</button>
+                        <input type="number" step="0.001" min="0" value={r.quantity} onChange={e => updateQty(r.product.id, Number(e.target.value))} aria-label={`Quantidade de ${r.product.name}`}
+                          style={{ width: 76, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', textAlign: 'right', fontSize: 13.5, fontFamily: 'DM Mono, monospace' }} />
+                        <button onClick={() => nudgeQty(r.product.id, r.product.unit === 'kg' ? 0.1 : 1)} aria-label="Aumentar"
+                          style={{ width: 32, height: 32, borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>+</button>
+                      </div>
+                      <div className="syne acg-item-total" style={{ color: 'var(--bp-text)' }}>
+                        {fmtCur(r.product.price * r.quantity)}
+                      </div>
+                      <button onClick={() => removeItem(r.product.id)} aria-label={`Remover ${r.product.name}`}
+                        style={{ width: 30, height: 30, borderRadius: 8, background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 15 }}>
+                        <i className="fas fa-times"></i>
                       </button>
-                    ))}
-                    {produtosFiltrados.length === 0 && (
-                      <p style={{ color: 'var(--bp-text-faint)', fontSize: 12, gridColumn: '1 / -1', margin: 0 }}>Nenhum produto para "{filtroProduto}"</p>
-                    )}
-                  </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
 
-            <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20, display: 'flex', flexDirection: 'column' }}>
-              <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 16px' }}>Pagamento</p>
-              <AcgSelect label="Forma de pagamento" value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)}>
-                {ACG_PAGAMENTOS.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
-              </AcgSelect>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <AcgInput label="Desconto (R$)" type="number" step="0.01" min="0" value={desconto}
-                  onChange={e => setDesconto(e.target.value)} placeholder="0,00" />
-                <AcgInput label="Acréscimo (R$)" type="number" step="0.01" min="0" value={acrescimo}
-                  onChange={e => setAcrescimo(e.target.value)} placeholder="0,00" />
-              </div>
-
-              {paymentMethod === 'dinheiro' && (
-                <div>
-                  <AcgInput label="Valor recebido (R$)" type="number" step="0.01" min="0" value={recebido}
-                    onChange={e => setRecebido(e.target.value)} placeholder="quanto o cliente deu" />
-                  {Number(recebido) > 0 && (
-                    <div style={{
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-                      padding: '10px 14px', borderRadius: 10, marginBottom: 12,
-                      background: trocoCalculado >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
-                      border: `1px solid ${trocoCalculado >= 0 ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)'}`,
-                    }}>
-                      <span style={{ fontSize: 13, color: 'var(--bp-text-secondary)' }}>
-                        {trocoCalculado >= 0 ? 'TROCO' : 'FALTAM'}
-                      </span>
-                      <span className="syne" style={{ fontSize: 26, fontWeight: 800, color: trocoCalculado >= 0 ? '#10b981' : '#ef4444' }}>
-                        {fmtCur(Math.abs(trocoCalculado))}
-                      </span>
-                    </div>
-                  )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* O TOTAL é o número que o cliente veio ver. Estava a 34px no rodapé de uma
+                  coluna estreita; agora abre a metade direita, sozinho, do tamanho que se lê
+                  em pé a dois metros do monitor. */}
+              <div style={{ background: 'var(--bp-panel)', border: `1px solid ${ACG_ACCENT}44`, borderRadius: 14, padding: '18px 20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: 12.5, color: 'var(--bp-text-faint)', fontWeight: 600, letterSpacing: '.06em' }}>TOTAL</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--bp-text-faint)' }}>
+                    {cart.length} {cart.length === 1 ? 'item' : 'itens'}
+                    {cart.some(c => c.product.unit === 'kg') && ` · ${cart.reduce((s, c) => s + (c.product.unit === 'kg' ? c.quantity : 0), 0).toFixed(3).replace('.', ',')} kg`}
+                  </span>
                 </div>
-              )}
-              {/* Espelha o painel do PDV antigo: o item recém-bipado em letra grande, para o
-                  operador conferir de relance se pegou o corte e o peso certos sem precisar ler
-                  a tabela do carrinho. É o que evita o cliente reclamar depois do cupom. */}
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: 120 }}>
-                {ultimoItem ? (
-                  <div style={{ background: 'var(--bp-card)', border: `1px solid ${ACG_ACCENT}44`, borderRadius: 12, padding: '14px 16px' }}>
-                    <div style={{ color: 'var(--bp-text-faint)', fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>ÚLTIMO ITEM</div>
-                    <div className="syne" style={{ color: 'var(--bp-text)', fontSize: 20, fontWeight: 800, lineHeight: 1.15, marginBottom: 6 }}>
-                      {ultimoItem.product.name}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, color: 'var(--bp-text-secondary)', fontSize: 13 }}>
-                      <strong style={{ color: ACG_ACCENT, fontSize: 18, fontFamily: 'DM Mono, monospace' }}>
-                        {Number(ultimoItem.quantity).toFixed(3).replace('.', ',')}
-                      </strong>
-                      <span>{ultimoItem.product.unit}</span>
-                      <span>×</span>
-                      <span>{fmtCur(ultimoItem.product.price)}</span>
-                    </div>
-                    <div style={{ color: 'var(--bp-text)', fontSize: 24, fontWeight: 800, marginTop: 6, fontFamily: 'DM Mono, monospace' }}>
-                      {fmtCur(ultimoItem.quantity * ultimoItem.product.price)}
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ textAlign: 'center', color: 'var(--bp-text-faint)', fontSize: 12 }}>
-                    <i className="fas fa-barcode" style={{ fontSize: 22, display: 'block', marginBottom: 8, opacity: 0.5 }}></i>
-                    Bipe um produto para começar
+                <div className="syne acg-caixa-total" style={{ color: 'var(--bp-text)', fontWeight: 800, marginTop: 2 }}>
+                  {fmtCur(totalFinal)}
+                </div>
+                {/* Com desconto aplicado, o total deixa de bater com a soma dos itens que o
+                    cliente acabou de acompanhar na tela. A conta fica explícita aqui para ele
+                    não precisar perguntar. */}
+                {valorDesconto > 0 && (
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: 13, color: 'var(--bp-text-muted)' }}>
+                    <span>Itens {fmtCur(totalBruto)}</span>
+                    <span style={{ color: '#10b981', fontWeight: 600 }}>− desconto de {descontoPct}% ({fmtCur(valorDesconto)})</span>
                   </div>
                 )}
               </div>
 
-              <div style={{ borderTop: '1px solid var(--bp-border)', paddingTop: 16, marginTop: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-                  <span style={{ fontSize: 12, color: 'var(--bp-text-faint)' }}>{cart.length} item(ns)</span>
-                  <span style={{ fontSize: 12, color: 'var(--bp-text-faint)' }}>
-                    {cart.reduce((s, c) => s + (c.product.unit === 'kg' ? c.quantity : 0), 0).toFixed(3).replace('.', ',')} kg
-                  </span>
+              {/* TROCO no mesmo corpo do total: na hora de pagar em dinheiro é ele que as duas
+                  pessoas estão olhando, e é a conta que mais gera discussão no balcão. */}
+              {paymentMethod === 'dinheiro' && Number(recebido) > 0 && (
+                <div style={{
+                  borderRadius: 14, padding: '16px 20px',
+                  background: trocoCalculado >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
+                  border: `1px solid ${trocoCalculado >= 0 ? 'rgba(16,185,129,0.45)' : 'rgba(239,68,68,0.45)'}`,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, letterSpacing: '.06em', color: trocoCalculado >= 0 ? '#10b981' : '#ef4444' }}>
+                      {trocoCalculado >= 0 ? 'TROCO' : 'AINDA FALTA'}
+                    </span>
+                    <span style={{ fontSize: 11.5, color: 'var(--bp-text-muted)' }}>recebido {fmtCur(recebido)}</span>
+                  </div>
+                  <div className="syne acg-caixa-troco" style={{ fontWeight: 800, marginTop: 2, color: trocoCalculado >= 0 ? '#10b981' : '#ef4444' }}>
+                    {fmtCur(Math.abs(trocoCalculado))}
+                  </div>
                 </div>
-                <p style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', color: 'var(--bp-text)', margin: '0 0 16px' }}>
-                  <span style={{ fontSize: 13, color: 'var(--bp-text-faint)', fontWeight: 600 }}>TOTAL</span>
-                  <span className="syne" style={{ fontSize: 34, fontWeight: 800, letterSpacing: -1 }}>{fmtCur(totalFinal)}</span>
-                </p>
-                <AcgButton onClick={finalize} disabled={cart.length === 0 || finalizing || (paymentMethod === 'dinheiro' && Number(recebido) > 0 && trocoCalculado < 0)} style={{ width: '100%', padding: '14px 0', fontSize: 15 }}>
-                  {finalizing ? 'Processando...' : <><i className="fas fa-check" style={{ marginRight: 8 }}></i>Finalizar venda</>}
+              )}
+
+              <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18 }}>
+                <AcgSelect label="Forma de pagamento" value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)}>
+                  {ACG_PAGAMENTOS.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
+                </AcgSelect>
+
+                {paymentMethod === 'dinheiro' && (
+                  <label style={{ display: 'block', marginBottom: 12 }}>
+                    <span style={{ display: 'block', color: 'var(--bp-text-faint)', fontSize: 12, marginBottom: 5 }}>
+                      Quanto o cliente deu (R$) <kbd style={{ background: `${ACG_ACCENT}22`, color: ACG_ACCENT, border: `1px solid ${ACG_ACCENT}55`, borderRadius: 4, padding: '0 5px', fontFamily: 'DM Mono, monospace', fontSize: 10.5, marginLeft: 4 }}>{hotkeys.troco || '—'}</kbd>
+                    </span>
+                    <input ref={recebidoRef} type="number" step="0.01" min="0" value={recebido}
+                      onChange={e => setRecebido(e.target.value)} placeholder="0,00"
+                      style={{ width: '100%', padding: '11px 13px', borderRadius: 9, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 16, fontFamily: 'DM Mono, monospace', boxSizing: 'border-box' }} />
+                  </label>
+                )}
+
+                {/* Desconto é botão, não campo: o percentual é do dono (Configurações), o
+                    operador só aplica. Sem percentual configurado o botão nem aparece — botão
+                    que não faz nada ensina o operador a ignorar botão. */}
+                {descontoPct > 0 && (
+                  <button type="button" onClick={acoes.desconto}
+                    style={{ width: '100%', padding: '11px 0', marginBottom: 12, borderRadius: 9, cursor: 'pointer', fontSize: 13.5, fontWeight: 600, fontFamily: 'Inter, sans-serif',
+                      background: descontoLigado ? 'rgba(16,185,129,0.15)' : 'var(--bp-card)',
+                      border: `1px solid ${descontoLigado ? 'rgba(16,185,129,0.5)' : 'var(--bp-border2)'}`,
+                      color: descontoLigado ? '#10b981' : 'var(--bp-text-muted)' }}>
+                    <i className={`fas ${descontoLigado ? 'fa-circle-check' : 'fa-percent'}`} style={{ marginRight: 8 }}></i>
+                    {descontoLigado ? `Desconto de ${descontoPct}% aplicado` : `Aplicar desconto de ${descontoPct}%`}
+                    <kbd style={{ background: `${ACG_ACCENT}22`, color: ACG_ACCENT, border: `1px solid ${ACG_ACCENT}55`, borderRadius: 4, padding: '0 5px', fontFamily: 'DM Mono, monospace', fontSize: 10.5, marginLeft: 8 }}>{hotkeys.desconto || '—'}</kbd>
+                  </button>
+                )}
+
+                <AcgButton onClick={finalize} disabled={cart.length === 0 || finalizing || (paymentMethod === 'dinheiro' && Number(recebido) > 0 && trocoCalculado < 0)}
+                  style={{ width: '100%', padding: '17px 0', fontSize: 16.5 }}>
+                  {finalizing ? 'Processando...' : <><i className="fas fa-check" style={{ marginRight: 9 }}></i>Finalizar venda</>}
                 </AcgButton>
+                {cpfNota && (
+                  <p style={{ margin: '10px 0 0', textAlign: 'center', color: '#16a34a', fontSize: 12 }}>
+                    <i className="fas fa-id-card" style={{ marginRight: 6 }}></i>CPF {cpfNota} vai na nota
+                  </p>
+                )}
               </div>
             </div>
           </div>
+
+          {/* Catálogo: caminho de exceção (produto sem etiqueta), então fica recolhido. */}
+          {manualProducts.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <AcgButton type="button" variant="ghost" onClick={alternarCatalogo}>
+                  <i className={`fas fa-${catalogoAberto ? 'chevron-up' : 'grip'}`} style={{ marginRight: 8 }}></i>
+                  {catalogoAberto ? 'Fechar lista de produtos' : 'Produto sem código de barras'}
+                </AcgButton>
+                {catalogoAberto && (
+                  <input
+                    value={filtroProduto}
+                    onChange={e => setFiltroProduto(e.target.value)}
+                    placeholder="filtrar por nome ou PLU..."
+                    style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 13, minWidth: 210, fontFamily: 'Inter, sans-serif' }}
+                  />
+                )}
+              </div>
+              {catalogoAberto && (
+                /* Altura limitada com rolagem própria: o catálogo tem quase 200 itens e, solto,
+                   empurrava o resto da tela para fora da vista. */
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10, maxHeight: 280, overflowY: 'auto', paddingRight: 4, marginTop: 12 }}>
+                  {produtosFiltrados.map(p => (
+                    <button key={p.id} onClick={() => addProductToCart(p)} style={{ padding: '15px 10px', borderRadius: 10, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }}>
+                      <span>{p.name}</span>
+                      <span style={{ color: ACG_ACCENT, fontWeight: 700 }}>{fmtCur(p.price)}</span>
+                    </button>
+                  ))}
+                  {produtosFiltrados.length === 0 && (
+                    <p style={{ color: 'var(--bp-text-faint)', fontSize: 12.5, gridColumn: '1 / -1', margin: 0 }}>Nenhum produto para "{filtroProduto}"</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Barra de funções: mostra o atalho e também funciona como botão, porque nem todo
               operador decora tecla no primeiro dia — e num balcão movimentado ninguém para
@@ -3255,6 +3385,20 @@
               <AcgInput label="Município" value={form.municipio || ''} onChange={e => setForm({ ...form, municipio: e.target.value })} />
               <AcgInput label="UF" value={form.uf || ''} onChange={e => setForm({ ...form, uf: e.target.value.toUpperCase().slice(0, 2) })} maxLength={2} />
               <AcgInput label="CEP" value={form.cep || ''} onChange={e => setForm({ ...form, cep: e.target.value })} />
+            </div>
+
+            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 4px' }}>Desconto do caixa</p>
+            <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '0 0 12px', lineHeight: 1.5 }}>
+              O operador não digita valor de desconto: aperta o botão (ou o atalho) e aplica este
+              percentual sobre o total. Deixe em 0 para não existir desconto no balcão — aí o
+              botão nem aparece na tela do caixa.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <AcgInput label="Desconto (%)" type="number" step="0.01" min="0" max="100"
+                value={form.desconto_pct ?? ''} onChange={e => setForm({ ...form, desconto_pct: e.target.value })}
+                hint={Number(form.desconto_pct) > 0
+                  ? `Em uma venda de R$ 100,00 o cliente paga ${fmtCur(100 - Number(form.desconto_pct))}.`
+                  : 'Desligado: sem botão de desconto no caixa.'} />
             </div>
 
             <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '10px 0 4px' }}>Atalhos do caixa</p>

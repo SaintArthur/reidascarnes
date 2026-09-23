@@ -2258,6 +2258,51 @@ app.post('/api/acougue/taxes/periods/close', ...donoOnly, async (req, res) => {
 // Reconsulta a nota na Focus e atualiza o que temos. Serve para dois casos reais do balcão:
 // a emissão respondeu mas a rede caiu antes de gravarmos, ou alguém precisa reimprimir uma
 // nota antiga e o DANFE não está mais em cache.
+/* ---- DANFE e XML servidos pelo próprio sistema ---- */
+// O cupom do cliente (DANFE NFC-e) e o XML da nota passam a sair DAQUI, não de um link da
+// Focus aberto no navegador do caixa. O servidor busca com o token e devolve o arquivo.
+//
+// Por que não deixar o navegador ir direto: a máquina do balcão passaria a precisar de
+// internet além do servidor, o pop-up do link externo morre em bloqueador, e o endereço do
+// arquivo (com o token, em algumas rotas) circularia no cliente.
+//
+// É `equipe`: reimprimir o cupom do cliente é trabalho de balcão, não decisão de dono.
+async function servirArquivoDaNota(req, res, { campo, oQueE, nomeArquivo }) {
+  try {
+    const nota = await db.get('SELECT id, status, numero, serie, xml_url, danfe_url FROM acougue_invoices WHERE id = ?', [req.params.id]);
+    if (!nota) return res.status(404).json({ error: 'Nota não encontrada' });
+    if (!nota[campo]) {
+      return res.status(422).json({
+        error: nota.status === 'autorizada'
+          ? `Esta nota está autorizada mas o sistema não guardou o endereço do ${oQueE}. Use "Consultar na SEFAZ" para buscá-lo de novo.`
+          : `Esta nota está como "${nota.status}" — ${oQueE} só existe depois que a SEFAZ autoriza.`,
+        code: 'sem_arquivo',
+      });
+    }
+    const arquivo = await focusNfe.baixarArquivo(nota[campo]);
+    if (!arquivo.ok) {
+      logEvent('ERROR', 'Focus recusou o {oQueE} da nota #{id}: HTTP {status}', { oQueE, id: nota.id, status: arquivo.status });
+      return res.status(502).json({ error: `A Focus NFe não devolveu o ${oQueE} (HTTP ${arquivo.status}).` });
+    }
+    // inline: o DANFE abre para imprimir na hora; o XML o contador salva.
+    const nome = `${nomeArquivo}-${nota.numero || nota.id}`;
+    res.set('Content-Type', arquivo.contentType);
+    res.set('Content-Disposition', `${campo === 'xml_url' ? 'attachment' : 'inline'}; filename="${nome}${campo === 'xml_url' ? '.xml' : '.html'}"`);
+    res.send(arquivo.buffer);
+  } catch (err) {
+    if (err.code === 'FOCUS_NOT_CONFIGURED') return res.status(422).json({ error: 'Focus NFe não configurada no servidor.' });
+    if (err.code === 'FOCUS_URL_INVALIDA') return res.status(422).json({ error: 'O endereço guardado para este arquivo não aponta para a Focus NFe.' });
+    if (err.code === 'FOCUS_NETWORK_ERROR') return res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.get('/api/acougue/notas/:id/danfe', ...acougueOnly, (req, res) =>
+  servirArquivoDaNota(req, res, { campo: 'danfe_url', oQueE: 'DANFE', nomeArquivo: 'danfe' }));
+
+app.get('/api/acougue/notas/:id/xml', ...acougueOnly, (req, res) =>
+  servirArquivoDaNota(req, res, { campo: 'xml_url', oQueE: 'XML', nomeArquivo: 'nfe' }));
+
 app.post('/api/acougue/nfce/:id/consultar', ...acougueOnly, async (req, res) => {
   try {
     const nota = await db.get('SELECT * FROM acougue_invoices WHERE id = ?', [req.params.id]);

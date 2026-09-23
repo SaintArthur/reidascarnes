@@ -1055,12 +1055,65 @@
     // layout: nesse caso abrimos o DANFE oficial. Este layout cobre o caso não autorizado, e aí
     // sai explicitamente carimbado como sem valor fiscal — imprimir algo parecido com cupom
     // fiscal sem autorização da SEFAZ é documento falso.
-    function printCupom({ sale, items, paymentMethod, invoice, settings }) {
-      if (invoice?.danfe_url) {
-        const danfe = window.open(invoice.danfe_url, '_blank');
-        if (danfe) { danfe.addEventListener('load', () => danfe.print()); return; }
-        // Popup bloqueado: cai no layout local para o operador não ficar sem comprovante.
+    // Imprime um HTML qualquer sem depender de pop-up: iframe escondido, mesma origem.
+    // window.open é a causa nº 1 de "cliquei em finalizar e não imprimiu" — o navegador barra
+    // a janela e o operador fica olhando a tela sem cupom, com a fila esperando.
+    function acgImprimirHtml(html) {
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
+      document.body.appendChild(frame);
+      frame.contentDocument.open();
+      frame.contentDocument.write(html);
+      frame.contentDocument.close();
+      frame.contentWindow.focus();
+      frame.contentWindow.print();
+      setTimeout(() => frame.remove(), 60000);
+    }
+
+    // Busca um arquivo de rota autenticada e devolve o Blob. <a href> e <iframe src> não
+    // carregam o cabeçalho de autorização, então não dá para apontar direto para a rota:
+    // é preciso buscar com o token e trabalhar com o conteúdo.
+    async function acgBaixarDaNota(notaId, tipo) {
+      const token = localStorage.getItem('token') || sessionStorage.getItem('token');
+      let res;
+      try {
+        res = await fetch(`${API_URL}/acougue/notas/${notaId}/${tipo}`, { headers: { Authorization: `Bearer ${token}` } });
+      } catch {
+        return { ok: false, erro: 'Sem conexão com o servidor.' };
       }
+      if (!res.ok) {
+        let erro = `Não foi possível obter o ${tipo.toUpperCase()}.`;
+        try { erro = (await res.json()).error || erro; } catch {}
+        return { ok: false, erro };
+      }
+      return { ok: true, blob: await res.blob() };
+    }
+
+    // Imprime o DANFE OFICIAL, o que a SEFAZ autorizou — com QR Code, protocolo e chave.
+    // Devolve false quando não conseguiu, para quem chamou decidir o que fazer.
+    async function acgImprimirDanfe(notaId) {
+      const r = await acgBaixarDaNota(notaId, 'danfe');
+      if (!r.ok) return r;
+      const html = await r.blob.text();
+      acgImprimirHtml(html);
+      return { ok: true };
+    }
+
+    async function acgBaixarXml(notaId, numero) {
+      const r = await acgBaixarDaNota(notaId, 'xml');
+      if (!r.ok) return r;
+      const url = URL.createObjectURL(r.blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nfe-${numero || notaId}.xml`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      return { ok: true };
+    }
+
+    function printCupom({ sale, items, paymentMethod, invoice, settings }) {
 
       const s = settings || {};
       const esc = (v) => String(v ?? '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
@@ -1077,12 +1130,12 @@
         </tr>`).join('');
 
       const cabecalhoFiscal = invoice ? `
-        <div class="c b">DOCUMENTO AUXILIAR DA NOTA FISCAL<br/>DE CONSUMIDOR ELETRÔNICA</div>
+        <div class="c b">VIA DE CONFERÊNCIA</div>
         <div class="c">NFC-e nº ${esc(invoice.numero)} — Série ${esc(invoice.serie)}</div>
         <div class="hr"></div>
         <div class="small">Chave de acesso:<br/>${esc(invoice.chave_acesso || '').replace(/(.{4})/g, '$1 ')}</div>
         <div class="small">Consulte em: www.sefaz.es.gov.br/nfce/consulta</div>
-        <div class="c small">CONSUMIDOR NÃO IDENTIFICADO</div>
+        <div class="c small aviso">O DANFE oficial, com QR Code, sai pelo sistema<br/>em Relatórios &gt; Histórico de vendas</div>
       ` : `
         <div class="c b aviso">*** SEM VALOR FISCAL ***</div>
         <div class="c small">Comprovante de venda — não substitui<br/>o documento fiscal exigido por lei</div>
@@ -1125,17 +1178,7 @@
         <div class="c small">Obrigado pela preferência!</div>
       </body></html>`;
 
-      // iframe escondido em vez de window.open: não depende de permissão de pop-up, que é a
-      // causa mais comum de "cliquei em finalizar e não imprimiu".
-      const frame = document.createElement('iframe');
-      frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
-      document.body.appendChild(frame);
-      frame.contentDocument.open();
-      frame.contentDocument.write(html);
-      frame.contentDocument.close();
-      frame.contentWindow.focus();
-      frame.contentWindow.print();
-      setTimeout(() => frame.remove(), 60000);
+      acgImprimirHtml(html);
     }
 
     /* ---- PRODUÇÃO E LOTES ---- */
@@ -1463,6 +1506,20 @@
         carregar(0);
       };
 
+      const imprimirDanfe = async (venda) => {
+        setOcupado(venda.id);
+        const r = await acgImprimirDanfe(venda.nota_id);
+        setOcupado(null);
+        if (!r.ok) showToast(r.erro, 'error');
+      };
+
+      const baixarXml = async (venda) => {
+        setOcupado(venda.id);
+        const r = await acgBaixarXml(venda.nota_id, venda.nota_numero);
+        setOcupado(null);
+        if (!r.ok) showToast(r.erro, 'error');
+      };
+
       const emitirNota = async (venda) => {
         const cpf = window.prompt(`Emitir NFC-e da venda ${venda.sale_number} (${fmtCur(venda.total_value)}).\n\nCPF na nota (deixe vazio para consumidor não identificado):`);
         if (cpf === null) return;
@@ -1533,9 +1590,24 @@
                             <td style={td}>{cancelada ? badge('Cancelada', '#ef4444') : badge('Concluída', '#10b981')}</td>
                             <td style={td}>
                               {rotuloNota ? (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
                                   {badge(v.nota_numero ? `${rotuloNota} nº ${v.nota_numero}` : rotuloNota, corNota)}
-                                  {v.danfe_url && <a href={v.danfe_url} target="_blank" rel="noopener noreferrer" style={{ color: ACG_ACCENT, fontSize: 11 }}>ver cupom</a>}
+                                  {/* Botões, não links: a rota exige autenticação, e <a href>
+                                      não carrega o cabeçalho do token. */}
+                                  <div style={{ display: 'flex', gap: 8 }}>
+                                    {v.danfe_url && (
+                                      <button type="button" onClick={() => imprimirDanfe(v)}
+                                        style={{ background: 'none', border: 'none', padding: 0, color: ACG_ACCENT, fontSize: 11, cursor: 'pointer', textDecoration: 'underline', fontFamily: 'Inter, sans-serif' }}>
+                                        imprimir DANFE
+                                      </button>
+                                    )}
+                                    {v.xml_url && (
+                                      <button type="button" onClick={() => baixarXml(v)}
+                                        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--bp-text-muted)', fontSize: 11, cursor: 'pointer', textDecoration: 'underline', fontFamily: 'Inter, sans-serif' }}>
+                                        XML
+                                      </button>
+                                    )}
+                                  </div>
                                   {v.nota_status === 'erro' && v.nota_erro && <span title={v.nota_erro} style={{ color: '#ef4444', fontSize: 10.5, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.nota_erro}</span>}
                                 </div>
                               ) : <span style={{ color: 'var(--bp-text-faint)', fontSize: 11.5 }}>sem nota</span>}
@@ -2246,7 +2318,15 @@
 
         const cupom = { sale, items: snapshot, paymentMethod, invoice: autorizada ? nfce.data : null, settings: fiscalSettings };
         ultimaVenda.current = cupom;
-        printCupom(cupom);
+        // Nota autorizada: o cliente leva o DANFE OFICIAL, com QR Code e protocolo, servido
+        // pelo próprio sistema. Só se ele não vier é que sai a via de conferência local — que
+        // não se apresenta como DANFE, porque sem QR Code não é um.
+        if (autorizada && nfce.data?.id) {
+          const r = await acgImprimirDanfe(nfce.data.id);
+          if (!r.ok) { showToast(`${r.erro} Imprimindo a via de conferência.`, 'error'); printCupom(cupom); }
+        } else {
+          printCupom(cupom);
+        }
         setCart([]);
         setCpfNota('');
         setUltimoItem(null);
@@ -2283,8 +2363,14 @@
 
         finalizar: () => { if (cart.length && !finalizing) finalize(); },
 
-        reimprimir: () => {
+        reimprimir: async () => {
           if (!ultimaVenda.current) { showToast('Nenhuma venda para reimprimir', 'info'); return; }
+          const nota = ultimaVenda.current.invoice;
+          if (nota?.id) {
+            const r = await acgImprimirDanfe(nota.id);
+            if (r.ok) return;
+            showToast(`${r.erro} Imprimindo a via de conferência.`, 'error');
+          }
           printCupom(ultimaVenda.current);
         },
 

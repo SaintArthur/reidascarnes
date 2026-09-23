@@ -60,6 +60,44 @@ function isFocusConfigured() {
   return !!FOCUS_NFE_TOKEN;
 }
 
+// Baixa o DANFE ou o XML de uma nota já autorizada, para o SERVIDOR servir o arquivo em vez de
+// mandar o navegador do caixa até a Focus. Ganha três coisas: não depende de a máquina do
+// balcão alcançar a internet além do próprio servidor, não esbarra em bloqueador de pop-up, e
+// o token da Focus nunca chega ao navegador.
+//
+// A URL vem do banco, mas quem a gravou foi a resposta da Focus — e "veio do banco" não é
+// garantia nenhuma: um valor adulterado ali transformaria esta função num buscador de URL
+// arbitrária rodando de dentro da rede (SSRF). Por isso só passa o que aponta para a Focus.
+const FOCUS_HOSTS = ['https://api.focusnfe.com.br/', 'https://homologacao.focusnfe.com.br/'];
+
+async function baixarArquivo(url) {
+  if (!isFocusConfigured()) {
+    const err = new Error('Focus NFe não configurada no servidor.');
+    err.code = 'FOCUS_NOT_CONFIGURED';
+    throw err;
+  }
+  if (!FOCUS_HOSTS.some(base => String(url || '').startsWith(base))) {
+    const err = new Error('Endereço de arquivo fora da Focus NFe.');
+    err.code = 'FOCUS_URL_INVALIDA';
+    throw err;
+  }
+  const auth = Buffer.from(`${FOCUS_NFE_TOKEN}:`).toString('base64');
+  let res;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+  } catch (networkErr) {
+    const err = new Error(`Falha de rede ao buscar o arquivo na Focus NFe: ${networkErr.message}`);
+    err.code = 'FOCUS_NETWORK_ERROR';
+    throw err;
+  }
+  return {
+    ok: res.ok,
+    status: res.status,
+    contentType: res.headers.get('content-type') || 'application/octet-stream',
+    buffer: Buffer.from(await res.arrayBuffer()),
+  };
+}
+
 async function focusRequest(method, path, body) {
   if (!isFocusConfigured()) {
     const err = new Error('Focus NFe não configurado. Defina FOCUS_NFE_TOKEN (e opcionalmente FOCUS_NFE_ENV=producao) no .env para emitir notas fiscais reais.');
@@ -338,6 +376,7 @@ function buildNFCePayload({ emitente, itens, valor_total, forma_pagamento, pagam
 
 module.exports = {
   isFocusConfigured,
+  baixarArquivo,
   dataEmissaoLocal,
   statusInterno,
   urlAbsoluta,

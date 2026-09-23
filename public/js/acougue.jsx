@@ -2032,13 +2032,21 @@
          40 de respiro = 270px úteis. O pior caso realista é "R$ 9.999,99" (11 caracteres), que
          em Syne bold com -2px ocupa cerca de 6em. 270 / 6 = 45px, daí o teto de 44px.
          O mínimo (28px) ainda é maior que qualquer outro número da tela. */
-      .acg-caixa-total { font-size: clamp(28px, 3.6vw, 44px); letter-spacing: -2px; line-height: 1.05; }
-      .acg-caixa-troco { font-size: clamp(24px, 3vw, 38px); letter-spacing: -1.5px; line-height: 1.05; }
+      /* UMA FONTE POR PAPEL, e a regra mora aqui para não voltar a divergir:
+         nome de produto e rótulo = Inter (a do corpo) · qualquer NÚMERO = DM Mono.
+         Estava misturado: o mesmo nome de produto saía em Syne no painel de cima e em Inter na
+         lista logo abaixo, e o dinheiro em Syne com o "peso × preço" em DM Mono coladinho nele.
+         Monoespaçada nos números não é gosto: os dígitos têm a mesma largura, então a vírgula
+         cai sempre na mesma coluna e a fila inteira de subtotais fica conferível de relance. */
+      .acg-num { font-family: 'DM Mono', monospace; }
+      .acg-caixa-total { font-family: 'DM Mono', monospace; font-size: clamp(28px, 3.6vw, 44px); letter-spacing: -1px; line-height: 1.1; }
+      .acg-caixa-troco { font-family: 'DM Mono', monospace; font-size: clamp(24px, 3vw, 38px); letter-spacing: -0.5px; line-height: 1.1; }
       /* Linha do item: o nome cede espaço primeiro (min-width 0), os controles não encolhem. */
       .acg-item-linha { display: flex; align-items: center; gap: 10px; padding: 11px 4px;
         border-bottom: 1px solid var(--bp-border); }
       .acg-item-nome { flex: 1 1 120px; min-width: 0; }
-      .acg-item-total { min-width: 88px; text-align: right; font-size: 17px; font-weight: 800; }
+      .acg-item-total { min-width: 92px; text-align: right; font-size: 16px; font-weight: 700;
+        font-family: 'DM Mono', monospace; }
       @media (max-width: 1080px) {
         .acg-caixa-grid { grid-template-columns: 1fr; }
         /* Empilhado, o total volta a ter a tela inteira para si — mas o teto continua valendo
@@ -2374,12 +2382,12 @@
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap',
                   background: ACG_ACCENT_BG, border: `1px solid ${ACG_ACCENT}55`, borderRadius: 12, padding: '13px 16px', marginTop: 12 }}>
                   <div style={{ minWidth: 0 }}>
-                    <div className="syne" style={{ color: 'var(--bp-text)', fontSize: 21, fontWeight: 800, lineHeight: 1.15 }}>{ultimoItem.product.name}</div>
-                    <div className="mono" style={{ color: 'var(--bp-text-secondary)', fontSize: 14, marginTop: 3 }}>
+                    <div style={{ color: 'var(--bp-text)', fontSize: 20, fontWeight: 700, lineHeight: 1.2 }}>{ultimoItem.product.name}</div>
+                    <div className="acg-num" style={{ color: 'var(--bp-text-secondary)', fontSize: 14, marginTop: 3 }}>
                       {Number(ultimoItem.quantity).toFixed(3).replace('.', ',')} {ultimoItem.product.unit} × {fmtCur(ultimoItem.product.price)}
                     </div>
                   </div>
-                  <div className="syne" style={{ color: ACG_ACCENT, fontSize: 28, fontWeight: 800, letterSpacing: -0.5 }}>
+                  <div className="acg-num" style={{ color: ACG_ACCENT, fontSize: 26, fontWeight: 700 }}>
                     {fmtCur(ultimoItem.quantity * ultimoItem.product.price)}
                   </div>
                 </div>
@@ -2399,7 +2407,7 @@
                     <div key={r.product.id} className="acg-item-linha">
                       <div className="acg-item-nome">
                         <div style={{ color: 'var(--bp-text)', fontSize: 15, fontWeight: 600, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.product.name}</div>
-                        <div className="mono" style={{ color: 'var(--bp-text-faint)', fontSize: 12.5, marginTop: 2 }}>
+                        <div className="acg-num" style={{ color: 'var(--bp-text-faint)', fontSize: 12.5, marginTop: 2 }}>
                           {Number(r.quantity).toFixed(3).replace('.', ',')} {r.product.unit} × {fmtCur(r.product.price)}
                         </div>
                       </div>
@@ -2411,7 +2419,7 @@
                         <button onClick={() => nudgeQty(r.product.id, r.product.unit === 'kg' ? 0.1 : 1)} aria-label="Aumentar"
                           style={{ width: 32, height: 32, borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text-secondary)', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>+</button>
                       </div>
-                      <div className="syne acg-item-total" style={{ color: 'var(--bp-text)' }}>
+                      <div className="acg-item-total" style={{ color: 'var(--bp-text)' }}>
                         {fmtCur(r.product.price * r.quantity)}
                       </div>
                       <button onClick={() => removeItem(r.product.id)} aria-label={`Remover ${r.product.name}`}
@@ -2436,7 +2444,7 @@
                     {cart.some(c => c.product.unit === 'kg') && ` · ${cart.reduce((s, c) => s + (c.product.unit === 'kg' ? c.quantity : 0), 0).toFixed(3).replace('.', ',')} kg`}
                   </span>
                 </div>
-                <div className="syne acg-caixa-total" style={{ color: 'var(--bp-text)', fontWeight: 800, marginTop: 2 }}>
+                <div className="acg-caixa-total" style={{ color: 'var(--bp-text)', fontWeight: 700, marginTop: 2 }}>
                   {fmtCur(totalFinal)}
                 </div>
                 {/* Com desconto aplicado, o total deixa de bater com a soma dos itens que o
@@ -2464,7 +2472,7 @@
                     </span>
                     <span style={{ fontSize: 11.5, color: 'var(--bp-text-muted)' }}>recebido {fmtCur(recebido)}</span>
                   </div>
-                  <div className="syne acg-caixa-troco" style={{ fontWeight: 800, marginTop: 2, color: trocoCalculado >= 0 ? '#10b981' : '#ef4444' }}>
+                  <div className="acg-caixa-troco" style={{ fontWeight: 700, marginTop: 2, color: trocoCalculado >= 0 ? '#10b981' : '#ef4444' }}>
                     {fmtCur(Math.abs(trocoCalculado))}
                   </div>
                 </div>

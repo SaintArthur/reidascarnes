@@ -1680,7 +1680,7 @@
     // Sem sessão de caixa não existe conferência de dinheiro: ninguém sabe se a gaveta bate
     // com o que foi vendido. Fica no topo do Caixa porque o operador precisa ver o estado da
     // gaveta antes de começar a vender, não escondido noutra aba.
-    function AcougueGaveta({ showToast }) {
+    function AcougueGaveta({ showToast, mostrarValores, onAlternarValores }) {
       const [sessao, setSessao] = useState(null);
       const [abrindo, setAbrindo] = useState('');
       const [painel, setPainel] = useState(null);
@@ -1747,27 +1747,41 @@
 
       return (
         <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 18, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: mostrarValores ? 12 : 0 }}>
             <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: 0 }}>
               <i className="fas fa-cash-register" style={{ marginRight: 8, color: '#10b981' }}></i>
               Caixa aberto — {sessao.vendas} venda(s)
             </p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <AcgButton variant="ghost" onClick={onAlternarValores}
+                title={mostrarValores ? 'Esconder os valores da gaveta' : 'Mostrar os valores da gaveta'}>
+                <i className={`fas ${mostrarValores ? 'fa-eye-slash' : 'fa-eye'}`} style={{ marginRight: 7 }}></i>
+                {mostrarValores ? 'Ocultar valores' : 'Mostrar valores'}
+              </AcgButton>
               <AcgButton variant="ghost" onClick={() => setPainel(painel === 'mov' ? null : 'mov')}>Sangria / Suprimento</AcgButton>
               <AcgButton onClick={() => setPainel(painel === 'fechar' ? null : 'fechar')}>Fechar caixa</AcgButton>
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
-            <Item label="Abertura" valor={sessao.valor_abertura} />
-            <Item label="Vendas em dinheiro" valor={sessao.total_dinheiro} />
-            <Item label="Outras formas" valor={sessao.total_outras} />
-            <Item label="Sangrias" valor={sessao.sangrias} cor="#ef4444" />
-            <Item label="Esperado na gaveta" valor={sessao.esperado_na_gaveta} cor="#10b981" />
-          </div>
-          <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '8px 0 0' }}>
-            Cartão, PIX e vale não passam pela gaveta — entram só como informação.
-          </p>
+          {mostrarValores ? (
+            <div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+                <Item label="Abertura" valor={sessao.valor_abertura} />
+                <Item label="Vendas em dinheiro" valor={sessao.total_dinheiro} />
+                <Item label="Outras formas" valor={sessao.total_outras} />
+                <Item label="Sangrias" valor={sessao.sangrias} cor="#ef4444" />
+                <Item label="Esperado na gaveta" valor={sessao.esperado_na_gaveta} cor="#10b981" />
+              </div>
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 11, margin: '8px 0 0' }}>
+                Cartão, PIX e vale não passam pela gaveta — entram só como informação.
+              </p>
+            </div>
+          ) : (
+            <p style={{ color: 'var(--bp-text-faint)', fontSize: 11.5, margin: '10px 0 0', display: 'flex', alignItems: 'center', gap: 7 }}>
+              <i className="fas fa-lock" style={{ fontSize: 11 }}></i>
+              Valores ocultos. O caixa segue aberto e registrando normalmente.
+            </p>
+          )}
 
           {painel === 'mov' && (
             <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--bp-border)' }}>
@@ -1824,9 +1838,19 @@
       const [cart, setCart] = useState([]);
       const [paymentMethod, setPaymentMethod] = useState('dinheiro');
       const [finalizing, setFinalizing] = useState(false);
-      const [todaySales, setTodaySales] = useState([]);
-      const [loadingSales, setLoadingSales] = useState(true);
       const [manualProducts, setManualProducts] = useState([]);
+      // Esta tela fica virada para o CLIENTE, no monitor do balcão. Por isso os valores da
+      // gaveta nascem escondidos: quanto dinheiro vivo existe ali agora não é informação para
+      // quem está do outro lado. Mostrar vira um ato deliberado do operador, e a escolha fica
+      // guardada no navegador daquele caixa — não no banco, porque é preferência da máquina
+      // (o monitor virado para o cliente), não da pessoa que entrou.
+      const [mostrarValores, setMostrarValores] = useState(() => {
+        try { return localStorage.getItem('acg_caixa_valores') === '1'; } catch { return false; }
+      });
+      const alternarValores = () => setMostrarValores(v => {
+        try { localStorage.setItem('acg_caixa_valores', v ? '0' : '1'); } catch {}
+        return !v;
+      });
       // Razão social, CNPJ, IE e endereço vão no cabeçalho do cupom impresso.
       const [fiscalSettings, setFiscalSettings] = useState(null);
       const [hotkeys, setHotkeys] = useState(ACG_HOTKEYS_PADRAO);
@@ -1858,14 +1882,7 @@
           p.name.toLowerCase().includes(termo) || String(p.scale_code || '').startsWith(termo));
       }, [manualProducts, filtroProduto]);
 
-      const loadToday = async () => {
-        setLoadingSales(true);
-        const res = await apiCall('GET', `/acougue/sales?date=${acgToday()}`);
-        if (res.ok) setTodaySales(res.data);
-        setLoadingSales(false);
-      };
       useEffect(() => {
-        loadToday();
         apiCall('GET', '/acougue/products').then(res => { if (res.ok) setManualProducts(res.data); });
         apiCall('GET', '/acougue/settings').then(res => {
           if (res.ok) { setFiscalSettings(res.data); setHotkeys(acgLerHotkeys(res.data)); }
@@ -1979,7 +1996,6 @@
         setCpfNota('');
         setUltimoItem(null);
         setDesconto(''); setAcrescimo(''); setRecebido('');
-        loadToday();
         inputRef.current?.focus();
       };
 
@@ -2055,18 +2071,11 @@
         return () => window.removeEventListener('keydown', onKey);
       });
 
-      const cancelSale = async (id) => {
-        if (!confirm('Cancelar esta venda? O estoque será devolvido.')) return;
-        const res = await apiCall('POST', `/acougue/sales/${id}/cancel`);
-        if (res.ok) { showToast('Venda cancelada', 'info'); loadToday(); }
-        else showToast(res.data?.error || 'Erro ao cancelar', 'error');
-      };
-
       return (
         <div>
           <AcgSectionTitle icon="fa-cash-register" title="Caixa" subtitle="Leitor de código de barras: escaneie e o item entra automaticamente" />
 
-          <AcougueGaveta showToast={showToast} />
+          <AcougueGaveta showToast={showToast} mostrarValores={mostrarValores} onAlternarValores={alternarValores} />
 
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)', gap: 16, marginBottom: 24 }}>
             <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
@@ -2247,23 +2256,11 @@
             )}
           </div>
 
-          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 20 }}>
-            <p className="syne" style={{ color: 'var(--bp-text)', fontWeight: 700, fontSize: 14, margin: '0 0 12px' }}>Vendas de hoje</p>
-            {loadingSales ? <AcgSpinner /> : (
-              <AcgTable
-                emptyLabel="Nenhuma venda hoje ainda"
-                columns={[
-                  { key: 'sale_number', label: 'Nº' },
-                  { key: 'created_at', label: 'Hora', render: r => new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) },
-                  { key: 'payment_method', label: 'Pagamento' },
-                  { key: 'total_value', label: 'Total', align: 'right', render: r => fmtCur(r.total_value) },
-                  { key: 'status', label: 'Status', render: r => <span style={{ color: r.status === 'cancelada' ? '#ef4444' : '#10b981', fontSize: 12, fontWeight: 600 }}>{r.status === 'cancelada' ? 'Cancelada' : 'Concluída'}</span> },
-                  { key: 'actions', label: '', align: 'right', render: r => r.status !== 'cancelada' && <button onClick={() => cancelSale(r.id)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 12 }}>Cancelar</button> },
-                ]}
-                rows={todaySales}
-              />
-            )}
-          </div>
+          {/* "Vendas de hoje" foi removida daqui: esta tela fica virada para o cliente, e a
+              tabela expunha o faturamento do dia inteiro, venda por venda, para quem estivesse
+              na fila — com um botão "Cancelar" em cada linha, ao alcance de qualquer um que
+              encostasse no monitor. Cancelar venda já fechada devolve estoque e mexe no fiscal:
+              é decisão de dono, não ação de balcão com cliente olhando. */}
         </div>
       );
     }

@@ -344,9 +344,21 @@ async function initDatabase() {
   // A Focus devolve o QR Code e a URL de consulta da NFC-e — sem guardar, não dá pra
   // reimprimir um cupom válido depois, nem mostrar ao consumidor como conferir a nota.
   for (const col of ['qrcode_url TEXT', 'url_consulta TEXT', 'status_sefaz TEXT',
-                     'contingencia INTEGER DEFAULT 0', 'contingencia_efetivada INTEGER DEFAULT 0']) {
+                     'contingencia INTEGER DEFAULT 0', 'contingencia_efetivada INTEGER DEFAULT 0',
+                     // Modelo do documento: '65' = NFC-e (cupom do balcão), '55' = NF-e (atacado
+                     // e entrada de produtor). Vira coluna porque a tela de Notas Fiscais filtra
+                     // por ele — deduzir do focus_ref a cada consulta seria frágil: o rascunho
+                     // ainda não tem focus_ref, e um dia o prefixo muda e tudo quebra calado.
+                     'modelo TEXT']) {
     await pool.query(`ALTER TABLE acougue_invoices ADD COLUMN IF NOT EXISTS ${col}`);
   }
+  // Backfill das notas já gravadas: nota que veio de venda é cupom, o resto é NF-e.
+  await pool.query(`UPDATE acougue_invoices SET modelo = CASE
+      WHEN focus_ref LIKE 'acougue-nfce-%' THEN '65'
+      WHEN ref_type = 'venda' THEN '65'
+      ELSE '55' END
+    WHERE modelo IS NULL`);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_invoices_listagem ON acougue_invoices(created_at DESC)');
 
   // Conferência de etiqueta: registra que alguém bipou a etiqueta REAL da balança e confirmou
   // (ou não) que o PLU daquele produto casa com o cadastro. É a única forma de detectar o
@@ -2006,8 +2018,8 @@ app.post('/api/acougue/sales/:id/nfce', ...acougueOnly, async (req, res) => {
     });
 
     const { rows } = await db.run(
-      'INSERT INTO acougue_invoices (type, ref_type, ref_id, total_value, status, payload, created_by) VALUES (?,?,?,?,?,?,?)',
-      ['saida', 'venda', sale.id, sale.total_value, 'rascunho', JSON.stringify(payload), req.user.id]
+      'INSERT INTO acougue_invoices (type, ref_type, ref_id, total_value, status, payload, created_by, modelo) VALUES (?,?,?,?,?,?,?,?)',
+      ['saida', 'venda', sale.id, sale.total_value, 'rascunho', JSON.stringify(payload), req.user.id, '65']
     );
     const invoiceId = rows[0].id;
 
@@ -2145,8 +2157,8 @@ app.post('/api/acougue/nfe', ...donoOnly, async (req, res) => {
   }
   try {
     const { rows } = await db.run(
-      'INSERT INTO acougue_invoices (type, ref_type, ref_id, total_value, status, payload, created_by) VALUES (?,?,?,?,?,?,?)',
-      [type, ref_type || 'manual', ref_id || null, total_value, 'rascunho', JSON.stringify({ itens, destinatario, natureza_operacao }), req.user.id]
+      'INSERT INTO acougue_invoices (type, ref_type, ref_id, total_value, status, payload, created_by, modelo) VALUES (?,?,?,?,?,?,?,?)',
+      [type, ref_type || 'manual', ref_id || null, total_value, 'rascunho', JSON.stringify({ itens, destinatario, natureza_operacao }), req.user.id, '55']
     );
     const invoiceId = rows[0].id;
 
@@ -2272,6 +2284,78 @@ app.post('/api/acougue/taxes/periods/close', ...donoOnly, async (req, res) => {
 // Reconsulta a nota na Focus e atualiza o que temos. Serve para dois casos reais do balcão:
 // a emissão respondeu mas a rede caiu antes de gravarmos, ou alguém precisa reimprimir uma
 // nota antiga e o DANFE não está mais em cache.
+/* ---- Notas Fiscais: todas num lugar só ---- */
+// As notas estavam espalhadas: o cupom do balcão só aparecia dentro do histórico de vendas, e
+// a NF-e só na tela de emissão. Para achar uma nota era preciso saber de antemão qual tipo ela
+// era — e quem procura (o contador, o dono atrás de um documento) muitas vezes não sabe.
+app.get('/api/acougue/notas', ...donoOnly, async (req, res) => {
+  try {
+    const de = String(req.query.de || '').slice(0, 10);
+    const ate = String(req.query.ate || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(de) || !/^\d{4}-\d{2}-\d{2}$/.test(ate)) {
+      return res.status(400).json({ error: 'Informe o período (de e até) no formato AAAA-MM-DD.' });
+    }
+    const limite = Math.min(Math.max(Number(req.query.limite) || 50, 1), 200);
+    const pulo = Math.max(Number(req.query.pulo) || 0, 0);
+
+    const filtros = ['i.created_at >= $1::date', "i.created_at < $2::date + INTERVAL '1 day'"];
+    const params = [de, ate];
+    if (['65', '55'].includes(String(req.query.modelo))) {
+      params.push(String(req.query.modelo));
+      filtros.push(`i.modelo = $${params.length}`);
+    }
+    if (req.query.status) {
+      params.push(String(req.query.status));
+      filtros.push(`i.status = $${params.length}`);
+    }
+    // Busca pelo número da nota ou pela chave de acesso — os dois jeitos de alguém chegar com
+    // uma nota na mão e querer achá-la aqui.
+    const busca = String(req.query.q || '').trim();
+    if (busca) {
+      params.push(`%${busca}%`);
+      filtros.push(`(i.chave_acesso ILIKE $${params.length} OR CAST(i.numero AS TEXT) ILIKE $${params.length})`);
+    }
+    const where = `WHERE ${filtros.join(' AND ')}`;
+
+    const { rows } = await pool.query(
+      `SELECT i.id, i.modelo, i.type, i.status, i.status_sefaz, i.numero, i.serie, i.total_value,
+              i.chave_acesso, i.danfe_url, i.xml_url, i.error_message, i.created_at,
+              i.contingencia, i.contingencia_efetivada,
+              s.sale_number, u.name AS emitida_por
+         FROM acougue_invoices i
+         LEFT JOIN acougue_sales s ON s.id = i.ref_id AND i.ref_type = 'venda'
+         LEFT JOIN users u ON u.id = i.created_by
+         ${where}
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limite, pulo]
+    );
+
+    // O resumo conta o PERÍODO inteiro, não a página. Paginar não pode mudar quantas notas
+    // foram autorizadas — é justamente esse número que o contador confere.
+    const { rows: [resumo] } = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE i.status = 'autorizada')::int AS autorizadas,
+              COUNT(*) FILTER (WHERE i.status = 'cancelada')::int AS canceladas,
+              COUNT(*) FILTER (WHERE i.status = 'erro')::int AS com_erro,
+              COUNT(*) FILTER (WHERE i.status = 'rascunho')::int AS rascunhos,
+              COUNT(*) FILTER (WHERE i.contingencia = 1 AND i.contingencia_efetivada = 0)::int AS contingencia_pendente,
+              COALESCE(SUM(i.total_value) FILTER (WHERE i.status = 'autorizada'), 0) AS valor_autorizado
+         FROM acougue_invoices i ${where}`,
+      params
+    );
+
+    res.json({
+      notas: rows,
+      ...resumo,
+      valor_autorizado: round2(Number(resumo.valor_autorizado)),
+      tem_mais: pulo + rows.length < resumo.total,
+      focus_configurada: focusNfe.isFocusConfigured(),
+      ambiente: focusNfe.FOCUS_NFE_ENV,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 /* ---- DANFE e XML servidos pelo próprio sistema ---- */
 // O cupom do cliente (DANFE NFC-e) e o XML da nota passam a sair DAQUI, não de um link da
 // Focus aberto no navegador do caixa. O servidor busca com o token e devolve o arquivo.

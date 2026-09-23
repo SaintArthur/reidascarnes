@@ -34,6 +34,7 @@
       { id: 'produtos', icon: 'fas fa-tags', label: 'Produtos', papeis: ['dono'] },
       { id: 'producao', icon: 'fas fa-industry', label: 'Produção e Lotes', papeis: ['dono'] },
       { id: 'notas', icon: 'fas fa-file-invoice', label: 'Emissão de Nota', papeis: ['dono'] },
+      { id: 'notas-fiscais', icon: 'fas fa-file-lines', label: 'Notas Fiscais', papeis: ['dono'] },
       { id: 'relatorios', icon: 'fas fa-chart-column', label: 'Relatórios', papeis: ['dono'] },
       { id: 'impostos', icon: 'fas fa-percent', label: 'PIS / COFINS', papeis: ['dono'] },
       { id: 'config', icon: 'fas fa-gear', label: 'Configurações', papeis: ['dono'] },
@@ -3038,6 +3039,212 @@
       );
     }
 
+    /* ---- NOTAS FISCAIS: todas num lugar só ---- */
+    // Antes o cupom do balcão só aparecia dentro do histórico de vendas e a NF-e só na tela de
+    // emissão: para achar uma nota era preciso saber de antemão qual tipo ela era. Quem procura
+    // — o contador, o dono atrás de um documento — normalmente não sabe.
+    const ACG_MODELO = { '65': ['NFC-e', 'cupom do balcão'], '55': ['NF-e', 'atacado / entrada'] };
+    const ACG_SITUACAO = {
+      autorizada: ['Autorizada', '#10b981'],
+      cancelada: ['Cancelada', '#ef4444'],
+      denegada: ['Denegada', '#ef4444'],
+      erro: ['Erro', '#ef4444'],
+      processando: ['Processando', '#f59e0b'],
+      rascunho: ['Rascunho', 'var(--bp-text-muted)'],
+    };
+
+    function AcougueNotasFiscais({ showToast }) {
+      const hoje = new Date().toISOString().slice(0, 10);
+      const trintaDias = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+      const [de, setDe] = useState(trintaDias);
+      const [ate, setAte] = useState(hoje);
+      const [modelo, setModelo] = useState('');
+      const [situacao, setSituacao] = useState('');
+      const [busca, setBusca] = useState('');
+      const [dados, setDados] = useState(null);
+      const [carregando, setCarregando] = useState(false);
+      const [pulo, setPulo] = useState(0);
+      const [ocupado, setOcupado] = useState(null);
+
+      const carregar = async (novoPulo = 0) => {
+        setCarregando(true);
+        const qs = new URLSearchParams({ de, ate, pulo: novoPulo, limite: 50 });
+        if (modelo) qs.set('modelo', modelo);
+        if (situacao) qs.set('status', situacao);
+        if (busca.trim()) qs.set('q', busca.trim());
+        const res = await apiCall('GET', `/acougue/notas?${qs}`);
+        setCarregando(false);
+        if (!res.ok) { showToast(res.data?.error || 'Erro ao carregar as notas', 'error'); return; }
+        setPulo(novoPulo);
+        setDados(d => (novoPulo > 0 && d ? { ...res.data, notas: [...d.notas, ...res.data.notas] } : res.data));
+      };
+      useEffect(() => { carregar(0); }, [de, ate, modelo, situacao]);
+
+      const comOcupado = async (nota, fn) => {
+        setOcupado(nota.id);
+        const r = await fn();
+        setOcupado(null);
+        if (r && !r.ok) showToast(r.erro, 'error');
+      };
+
+      const consultar = async (nota) => {
+        setOcupado(nota.id);
+        const res = await apiCall('POST', `/acougue/nfce/${nota.id}/consultar`);
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'Não foi possível consultar', 'error'); return; }
+        showToast(`Situação na SEFAZ: ${res.data.status}${res.data.sefaz ? ` — ${res.data.sefaz}` : ''}`, 'info');
+        carregar(0);
+      };
+
+      const cancelar = async (nota) => {
+        const minutos = Math.floor((Date.now() - new Date(nota.created_at).getTime()) / 60000);
+        const aviso = nota.modelo === '65' && minutos >= 30
+          ? `ATENÇÃO: cupom emitido há ${minutos} min. O prazo da NFC-e é de 30 min — a SEFAZ provavelmente recusa. Tentar assim mesmo?\n\n`
+          : '';
+        const justificativa = window.prompt(`${aviso}Cancelar na SEFAZ a nota nº ${nota.numero || '—'}.\n\nJustificativa (mínimo 15 caracteres):`, '');
+        if (justificativa === null) return;
+        if (justificativa.trim().length < 15) { showToast('A SEFAZ exige justificativa com no mínimo 15 caracteres.', 'error'); return; }
+        setOcupado(nota.id);
+        // NFC-e e NF-e se cancelam por rotas diferentes — modelos diferentes, eventos diferentes.
+        const rota = nota.modelo === '65' ? `/acougue/nfce/${nota.id}/cancelar` : `/acougue/nfe/${nota.id}/cancel`;
+        const res = await apiCall('POST', rota, { justificativa: justificativa.trim() });
+        setOcupado(null);
+        if (!res.ok) { showToast(res.data?.error || 'A SEFAZ recusou o cancelamento', 'error'); return; }
+        showToast(`Nota nº ${nota.numero} cancelada`, 'success');
+        carregar(0);
+      };
+
+      const th = { textAlign: 'left', padding: '9px 10px', color: 'var(--bp-text-faint)', fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em', borderBottom: '1px solid var(--bp-border)', whiteSpace: 'nowrap' };
+      const td = { padding: '10px', borderBottom: '1px solid var(--bp-border)', fontSize: 12.5, color: 'var(--bp-text)', verticalAlign: 'middle' };
+      const badge = (texto, cor) => <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 999, fontSize: 10.5, fontWeight: 600, color: cor, background: `${cor}1f`, border: `1px solid ${cor}55`, whiteSpace: 'nowrap' }}>{texto}</span>;
+      const acao = (texto, cor, onClick, disabled) => (
+        <button type="button" onClick={onClick} disabled={disabled}
+          style={{ background: 'none', border: 'none', padding: 0, color: cor, fontSize: 11, cursor: disabled ? 'wait' : 'pointer', textDecoration: 'underline', fontFamily: 'Inter, sans-serif' }}>{texto}</button>
+      );
+
+      return (
+        <div>
+          <AcgSectionTitle icon="fa-file-lines" title="Notas Fiscais" subtitle="Todo documento fiscal do açougue: cupom do balcão e NF-e, no mesmo lugar" />
+
+          {dados && !dados.focus_configurada && (
+            <div style={{ background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 12, padding: '12px 16px', marginBottom: 16, color: 'var(--bp-text)', fontSize: 12.5, lineHeight: 1.5 }}>
+              <i className="fas fa-triangle-exclamation" style={{ color: '#f59e0b', marginRight: 8 }}></i>
+              Focus NFe não configurada: nada aqui foi transmitido à SEFAZ. As notas ficam como rascunho até <code>FOCUS_NFE_TOKEN</code> existir no servidor.
+            </div>
+          )}
+          {dados?.focus_configurada && dados.ambiente !== 'producao' && (
+            <div style={{ background: 'rgba(59,130,246,0.10)', border: '1px solid rgba(59,130,246,0.35)', borderRadius: 12, padding: '12px 16px', marginBottom: 16, color: 'var(--bp-text)', fontSize: 12.5 }}>
+              <i className="fas fa-flask" style={{ color: '#3b82f6', marginRight: 8 }}></i>
+              Ambiente de <strong>homologação</strong>: estas notas são de teste e não têm validade fiscal.
+            </div>
+          )}
+          {dados?.contingencia_pendente > 0 && (
+            <div style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 12, padding: '12px 16px', marginBottom: 16, color: 'var(--bp-text)', fontSize: 12.5 }}>
+              <i className="fas fa-clock" style={{ color: '#ef4444', marginRight: 8 }}></i>
+              <strong>{dados.contingencia_pendente} nota(s) em contingência ainda não efetivada(s).</strong> O cupom já está com o cliente e a SEFAZ ainda não recebeu — isso tem prazo e gera multa.
+            </div>
+          )}
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+              <AcgInput label="De" type="date" value={de} onChange={e => setDe(e.target.value)} />
+              <AcgInput label="Até" type="date" value={ate} onChange={e => setAte(e.target.value)} />
+              <AcgSelect label="Modelo" value={modelo} onChange={e => setModelo(e.target.value)}>
+                <option value="">Todos</option>
+                <option value="65">NFC-e — cupom do balcão</option>
+                <option value="55">NF-e — atacado / entrada</option>
+              </AcgSelect>
+              <AcgSelect label="Situação" value={situacao} onChange={e => setSituacao(e.target.value)}>
+                <option value="">Todas</option>
+                {Object.entries(ACG_SITUACAO).map(([k, [rotulo]]) => <option key={k} value={k}>{rotulo}</option>)}
+              </AcgSelect>
+            </div>
+            <form onSubmit={e => { e.preventDefault(); carregar(0); }} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input value={busca} onChange={e => setBusca(e.target.value)} placeholder="buscar por número ou chave de acesso..."
+                style={{ flex: 1, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--bp-border2)', background: 'var(--bp-card)', color: 'var(--bp-text)', fontSize: 12.5, fontFamily: 'Inter, sans-serif' }} />
+              <AcgButton type="submit" variant="ghost" style={{ padding: '8px 13px', fontSize: 12 }}><i className="fas fa-magnifying-glass"></i></AcgButton>
+            </form>
+          </div>
+
+          {dados && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 16 }}>
+              <AcgCard label="Autorizadas" value={String(dados.autorizadas)} icon="fa-circle-check" color="#10b981" bg="rgba(16,185,129,0.12)"
+                hint={fmtCur(dados.valor_autorizado)} />
+              <AcgCard label="Canceladas" value={String(dados.canceladas)} icon="fa-ban" color="#ef4444" bg="rgba(239,68,68,0.12)" />
+              <AcgCard label="Com erro" value={String(dados.com_erro)} icon="fa-triangle-exclamation" color="#f59e0b" bg="rgba(245,158,11,0.12)"
+                hint={dados.com_erro > 0 ? 'precisam ser reemitidas' : undefined} hintColor={dados.com_erro > 0 ? '#f59e0b' : undefined} />
+              <AcgCard label="Rascunhos" value={String(dados.rascunhos)} icon="fa-file" color="var(--bp-text-muted)" bg="var(--bp-card)"
+                hint={dados.rascunhos > 0 ? 'nunca foram à SEFAZ' : undefined} />
+            </div>
+          )}
+
+          <div style={{ background: 'var(--bp-panel)', border: '1px solid var(--bp-border)', borderRadius: 14, overflow: 'hidden' }}>
+            {!dados ? <AcgSpinner /> : dados.notas.length === 0 ? (
+              <p style={{ color: 'var(--bp-text-faint)', fontSize: 13, textAlign: 'center', padding: 30, margin: 0 }}>Nenhuma nota no período com esses filtros.</p>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead><tr>
+                    <th style={th}>Emitida</th><th style={th}>Modelo</th><th style={th}>Nº / Série</th>
+                    <th style={{ ...th, textAlign: 'right' }}>Valor</th><th style={th}>Situação</th>
+                    <th style={th}>Chave de acesso</th><th style={th}></th>
+                  </tr></thead>
+                  <tbody>
+                    {dados.notas.map(n => {
+                      const [rotuloModelo, oQueE] = ACG_MODELO[n.modelo] || ['—', ''];
+                      const [rotuloSit, corSit] = ACG_SITUACAO[n.status] || [n.status, 'var(--bp-text-muted)'];
+                      return (
+                        <tr key={n.id} style={{ opacity: n.status === 'cancelada' ? 0.6 : 1 }}>
+                          <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                            {acgDataHora(n.created_at)}
+                            <div style={{ fontSize: 10.5, color: 'var(--bp-text-faint)' }}>{n.emitida_por || '—'}</div>
+                          </td>
+                          <td style={td}>
+                            <div style={{ fontWeight: 600 }}>{rotuloModelo}</div>
+                            <div style={{ fontSize: 10.5, color: 'var(--bp-text-faint)' }}>{n.sale_number || oQueE}</div>
+                          </td>
+                          <td style={td}><span className="acg-num">{n.numero ? `${n.numero} / ${n.serie || '1'}` : '—'}</span></td>
+                          <td style={{ ...td, textAlign: 'right' }}><span className="acg-num" style={{ fontWeight: 700 }}>{fmtCur(n.total_value)}</span></td>
+                          <td style={td}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                              {badge(rotuloSit, corSit)}
+                              {n.contingencia === 1 && badge(n.contingencia_efetivada ? 'contingência efetivada' : 'contingência pendente', n.contingencia_efetivada ? '#10b981' : '#ef4444')}
+                              {n.error_message && <span title={n.error_message} style={{ color: '#ef4444', fontSize: 10.5, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.error_message}</span>}
+                            </div>
+                          </td>
+                          <td style={td}>
+                            {n.chave_acesso
+                              ? <span className="acg-num" style={{ fontSize: 10.5, color: 'var(--bp-text-muted)', wordBreak: 'break-all' }}>{n.chave_acesso}</span>
+                              : <span style={{ color: 'var(--bp-text-faint)', fontSize: 11 }}>—</span>}
+                          </td>
+                          <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                              {n.danfe_url && acao('DANFE', ACG_ACCENT, () => comOcupado(n, () => acgImprimirDanfe(n.id)), ocupado === n.id)}
+                              {n.xml_url && acao('XML', 'var(--bp-text-muted)', () => comOcupado(n, () => acgBaixarXml(n.id, n.numero)), ocupado === n.id)}
+                              {['processando', 'autorizada'].includes(n.status) && n.modelo === '65' && acao('consultar', '#3b82f6', () => consultar(n), ocupado === n.id)}
+                              {n.status === 'autorizada' && acao('cancelar', '#ef4444', () => cancelar(n), ocupado === n.id)}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {dados?.tem_mais && (
+            <div style={{ textAlign: 'center', marginTop: 12 }}>
+              <AcgButton type="button" variant="ghost" disabled={carregando} onClick={() => carregar(pulo + 50)}>
+                {carregando ? 'Carregando...' : 'Carregar mais notas'}
+              </AcgButton>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     /* ---- PIS / COFINS ---- */
     // Imprime dentro da própria página (em vez de abrir aba nova via window.open) — bloqueadores
     // de pop-up (ativados por padrão na maioria dos navegadores) impediam o relatório de abrir.
@@ -4078,6 +4285,7 @@
                 : activeView === 'caixa' ? <AcougueCaixa showToast={showToast} />
                 : activeView === 'clientes' ? <AcougueClientes showToast={showToast} />
                 : activeView === 'notas' ? <AcougueNotas showToast={showToast} />
+                : activeView === 'notas-fiscais' ? <AcougueNotasFiscais showToast={showToast} />
                 : activeView === 'relatorios' ? <AcougueRelatorios showToast={showToast} />
                 : activeView === 'impostos' ? <AcougueImpostos showToast={showToast} />
                 : activeView === 'config' ? <AcougueConfig showToast={showToast} />

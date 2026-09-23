@@ -2925,12 +2925,25 @@
           itens: [{ descricao: form.descricao || (form.type === 'entrada' ? 'Compra de carcaça' : 'Venda de mercadoria'), quantidade: 1, unidade: 'UN', valor_unitario: Number(form.total_value), valor_total: Number(form.total_value) }],
         });
         setSaving(false);
-        if (res.ok) {
-          showToast(res.data.warning || `Nota registrada (${res.data.status})`, res.data.warning ? 'info' : 'success');
-          setForm(emptyForm); setShowForm(false); load();
-        } else {
-          showToast(res.data?.error || 'Erro ao emitir nota', 'error');
+        if (!res.ok) { showToast(res.data?.error || 'Erro ao emitir nota', 'error'); return; }
+        showToast(res.data.warning || `Nota registrada (${res.data.status})`, res.data.warning ? 'info' : 'success');
+        setForm(emptyForm); setShowForm(false); load();
+        // Autorizada, o DANFE sai na hora, sem ninguém pedir: ele acompanha a mercadoria, e
+        // nota emitida sem DANFE impresso é carga que não pode sair do açougue.
+        if (res.data.danfe_pronto) {
+          const r = await acgImprimirDanfe(res.data.id);
+          if (!r.ok) showToast(`Nota autorizada, mas o DANFE não veio: ${r.erro}`, 'error');
         }
+      };
+
+      const imprimirDanfe = async (nota) => {
+        const r = await acgImprimirDanfe(nota.id);
+        if (!r.ok) showToast(r.erro, 'error');
+      };
+
+      const baixarXml = async (nota) => {
+        const r = await acgBaixarXml(nota.id, nota.numero);
+        if (!r.ok) showToast(r.erro, 'error');
       };
 
       const cancelNota = async (id) => {
@@ -2995,7 +3008,27 @@
                   { key: 'total_value', label: 'Valor', align: 'right', render: r => fmtCur(r.total_value) },
                   { key: 'chave_acesso', label: 'Chave de acesso', render: r => r.chave_acesso ? <span style={{ fontFamily: 'DM Mono, monospace', fontSize: 11 }}>{r.chave_acesso}</span> : '—' },
                   { key: 'status', label: 'Status', render: r => <span style={{ color: statusColor[r.status], fontSize: 12, fontWeight: 600 }}>{statusLabel[r.status] || r.status}</span> },
-                  { key: 'actions', label: '', align: 'right', render: r => (r.status === 'autorizada' || r.status === 'rascunho') && <button onClick={() => cancelNota(r.id)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 12 }}>Cancelar</button> },
+                  { key: 'actions', label: '', align: 'right', render: r => (
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center' }}>
+                      {/* O DANFE é o papel que viaja com a mercadoria — reimprimir é rotina
+                          (rasgou, molhou, o motorista perdeu), não exceção. */}
+                      {r.danfe_url && (
+                        <button onClick={() => imprimirDanfe(r)} style={{ background: 'none', border: 'none', color: ACG_ACCENT, cursor: 'pointer', fontSize: 12, textDecoration: 'underline', padding: 0, fontFamily: 'Inter, sans-serif' }}>
+                          imprimir DANFE
+                        </button>
+                      )}
+                      {r.xml_url && (
+                        <button onClick={() => baixarXml(r)} style={{ background: 'none', border: 'none', color: 'var(--bp-text-muted)', cursor: 'pointer', fontSize: 12, textDecoration: 'underline', padding: 0, fontFamily: 'Inter, sans-serif' }}>
+                          XML
+                        </button>
+                      )}
+                      {(r.status === 'autorizada' || r.status === 'rascunho') && (
+                        <button onClick={() => cancelNota(r.id)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 12, textDecoration: 'underline', padding: 0, fontFamily: 'Inter, sans-serif' }}>
+                          cancelar
+                        </button>
+                      )}
+                    </div>
+                  ) },
                 ]}
                 rows={notas}
               />

@@ -2178,9 +2178,20 @@ app.post('/api/acougue/nfe', ...donoOnly, async (req, res) => {
       const status = result.data?.status === 'autorizado' ? 'autorizada' : (result.ok ? 'processando' : 'erro');
       await db.run(
         'UPDATE acougue_invoices SET status=?, focus_ref=?, chave_acesso=?, numero=?, serie=?, xml_url=?, danfe_url=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
-        [status, ref, result.data?.chave_nfe || null, result.data?.numero || null, result.data?.serie || null, result.data?.caminho_xml_nota_fiscal || null, result.data?.caminho_danfe || null, result.ok ? null : (result.data?.mensagem_sefaz || result.data?.mensagem || 'Erro na Focus NFe'), invoiceId]
+        // urlAbsoluta nos dois caminhos: a Focus devolve caminho RELATIVO, e esta rota guardava
+        // cru enquanto a da NFC-e já convertia. Guardado assim, o DANFE da NF-e não abria por
+        // lugar nenhum — nem pelo navegador (link quebrado) nem pelo servidor, que recusa
+        // endereço que não aponte para a Focus.
+        [status, ref, result.data?.chave_nfe || null, result.data?.numero || null, result.data?.serie || null,
+          focusNfe.urlAbsoluta(result.data?.caminho_xml_nota_fiscal), focusNfe.urlAbsoluta(result.data?.caminho_danfe),
+          result.ok ? null : (result.data?.mensagem_sefaz || result.data?.mensagem || 'Erro na Focus NFe'), invoiceId]
       );
-      res.status(201).json({ id: invoiceId, status, focus_ref: ref, raw: result.data });
+      res.status(201).json({
+        id: invoiceId, status, focus_ref: ref, raw: result.data,
+        // A tela usa isto para mandar o DANFE direto para a impressora quando a nota sai
+        // autorizada — o DANFE acompanha a mercadoria, então ele tem que sair junto.
+        danfe_pronto: status === 'autorizada' && !!result.data?.caminho_danfe,
+      });
     } catch (focusErr) {
       await db.run("UPDATE acougue_invoices SET status = 'erro', error_message = ? WHERE id = ?", [focusErr.message, invoiceId]);
       res.status(502).json({ id: invoiceId, status: 'erro', error: focusErr.message });
@@ -2282,7 +2293,9 @@ async function servirArquivoDaNota(req, res, { campo, oQueE, nomeArquivo }) {
         code: 'sem_arquivo',
       });
     }
-    const arquivo = await focusNfe.baixarArquivo(nota[campo]);
+    // urlAbsoluta aqui também, e não só na gravação: notas gravadas antes da correção têm o
+    // caminho relativo no banco, e sem isto continuariam sem abrir para sempre.
+    const arquivo = await focusNfe.baixarArquivo(focusNfe.urlAbsoluta(nota[campo]));
     if (!arquivo.ok) {
       logEvent('ERROR', 'Focus recusou o {oQueE} da nota #{id}: HTTP {status}', { oQueE, id: nota.id, status: arquivo.status });
       return res.status(502).json({ error: `A Focus NFe não devolveu o ${oQueE} (HTTP ${arquivo.status}).` });
